@@ -1,6 +1,8 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
+using MoonSharp.Interpreter;
 using Newtonsoft.Json.Linq;
 using SpaceWarp2.API.Mods;
 using UnityEngine;
@@ -18,6 +20,8 @@ namespace ReduxTestHarness
         private bool _startupWarningDismissed;
         private float _nextStartupWarningProbe;
         private float _startupWarningProbeDeadline;
+        private bool _includeStartupLogs;
+        private IDisposable _testApiRegistration;
 
         public override void OnInitialized()
         {
@@ -42,7 +46,14 @@ namespace ReduxTestHarness
                 Environment.GetEnvironmentVariable("REDUX_TEST_DISMISS_PHOTOSENSITIVITY"),
                 "1",
                 StringComparison.Ordinal);
+            _includeStartupLogs = string.Equals(
+                Environment.GetEnvironmentVariable("REDUX_TEST_INCLUDE_STARTUP_LOGS"),
+                "1",
+                StringComparison.Ordinal);
             _startupWarningProbeDeadline = Time.realtimeSinceStartup + 30f;
+            _testApiRegistration = TestApiRegistry.Register(
+                "ReduxTestHarness",
+                ConfigureHarnessTestApi);
 
             int port = DefaultPort;
             string configuredPort = Environment.GetEnvironmentVariable("REDUX_TEST_PORT");
@@ -99,6 +110,10 @@ namespace ReduxTestHarness
             int budget = 16;
             while (budget-- > 0 && _server.TryDequeue(out command))
             {
+                if (command.IsAbandoned != null && command.IsAbandoned())
+                {
+                    continue;
+                }
                 ProcessCommand(command);
             }
         }
@@ -187,6 +202,10 @@ namespace ReduxTestHarness
             response["gameState"] = _game == null ? "Unavailable" : _game.State;
             response["testStatus"] = _runner == null ? "idle" : _runner.Status;
             response["protocolVersion"] = 1;
+            response["harnessVersion"] =
+                Assembly.GetExecutingAssembly().GetName().Version.ToString();
+            response["activeModCount"] =
+                SpaceWarp2.API.Mods.PluginList.AllEnabledAndActivePlugins.Count;
             response["reduxCliIntegration"] = CliIntegrationProbe.Snapshot();
             response["startupWarningVisible"] =
                 StartupDialogAutomation.IsPhotosensitivityWarningVisible();
@@ -216,6 +235,7 @@ namespace ReduxTestHarness
             string fixturesRoot = RequiredString(payload, "fixturesRoot");
             int timeout = (int?)payload["timeoutSeconds"] ?? 180;
             timeout = Mathf.Clamp(timeout, 1, 86400);
+            bool failOnLogErrors = (bool?)payload["failOnLogErrors"] ?? false;
 
             _runner = new LuaTestRunner(
                 this,
@@ -226,7 +246,11 @@ namespace ReduxTestHarness
                 resultsRoot,
                 fixturesRoot,
                 timeout,
+                _includeStartupLogs,
+                failOnLogErrors,
+                message => SWLogger.LogInfo("[ReduxTestHarness/Runner] " + message),
                 message => SWLogger.LogError("[ReduxTestHarness/Runner] " + message));
+            _includeStartupLogs = false;
 
             JObject response = JsonLineBridgeServer.Success();
             response["accepted"] = true;
@@ -287,6 +311,21 @@ namespace ReduxTestHarness
             return value;
         }
 
+        private static void ConfigureHarnessTestApi(Script script, Table table)
+        {
+            table.Set(
+                "protocol_version",
+                TestApiRegistry.Callback(
+                    "Test.mod.extensions.ReduxTestHarness.protocol_version",
+                    (context, arguments) => DynValue.NewNumber(1)));
+            table.Set(
+                "version",
+                TestApiRegistry.Callback(
+                    "Test.mod.extensions.ReduxTestHarness.version",
+                    (context, arguments) => DynValue.NewString(
+                        Assembly.GetExecutingAssembly().GetName().Version.ToString())));
+        }
+
         private void OnDestroy()
         {
             if (_runner != null && !_runner.IsFinished)
@@ -294,6 +333,11 @@ namespace ReduxTestHarness
                 _runner.Cancel("ReduxTestHarness was unloaded.");
             }
             _runner = null;
+            if (_testApiRegistration != null)
+            {
+                _testApiRegistration.Dispose();
+                _testApiRegistration = null;
+            }
             if (_server != null)
             {
                 _server.Dispose();

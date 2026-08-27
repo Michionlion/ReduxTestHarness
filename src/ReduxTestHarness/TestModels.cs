@@ -60,6 +60,9 @@ namespace ReduxTestHarness
         [JsonProperty("errors")]
         public readonly List<TestError> Errors = new List<TestError>();
 
+        [JsonProperty("warnings")]
+        public readonly List<TestError> Warnings = new List<TestError>();
+
         [JsonProperty("process")]
         public ProcessRecord Process = new ProcessRecord();
     }
@@ -86,6 +89,25 @@ namespace ReduxTestHarness
 
         [JsonProperty("graphicsDevice")]
         public string GraphicsDevice;
+
+        [JsonProperty("mods")]
+        public readonly List<ModEnvironmentRecord> Mods =
+            new List<ModEnvironmentRecord>();
+    }
+
+    internal sealed class ModEnvironmentRecord
+    {
+        [JsonProperty("id")]
+        public string Id;
+
+        [JsonProperty("name")]
+        public string Name;
+
+        [JsonProperty("version")]
+        public string Version;
+
+        [JsonProperty("assembly")]
+        public string Assembly;
     }
 
     internal sealed class AssertionRecord
@@ -135,6 +157,7 @@ namespace ReduxTestHarness
         public string Command;
         public Newtonsoft.Json.Linq.JObject Payload;
         public Action<Newtonsoft.Json.Linq.JObject> Complete;
+        public Func<bool> IsAbandoned;
     }
 
     internal sealed class TestStatusSnapshot

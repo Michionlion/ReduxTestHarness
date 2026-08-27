@@ -37,7 +37,20 @@
         "harnessVersion": { "type": ["string", "null"] },
         "unityVersion": { "type": ["string", "null"] },
         "platform": { "type": ["string", "null"] },
-        "graphicsDevice": { "type": ["string", "null"] }
+        "graphicsDevice": { "type": ["string", "null"] },
+        "mods": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+              "id": { "type": ["string", "null"] },
+              "name": { "type": ["string", "null"] },
+              "version": { "type": ["string", "null"] },
+              "assembly": { "type": ["string", "null"] }
+            }
+          }
+        }
       }
     },
     "fixture": { "type": ["string", "null"] },
@@ -76,6 +89,18 @@
         }
       }
     },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "message"],
+        "properties": {
+          "kind": { "type": ["string", "null"] },
+          "message": { "type": ["string", "null"] },
+          "stackTrace": { "type": ["string", "null"] }
+        }
+      }
+    },
     "process": {
       "type": "object",
       "required": ["processId", "crashed"],
@@ -87,4 +112,3 @@
     }
   }
 }
-

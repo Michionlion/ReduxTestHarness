@@ -6,12 +6,16 @@ using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using Newtonsoft.Json;
+using SpaceWarp2.API.Mods;
+using SpaceWarp2.API.Mods.JSON;
 using UnityEngine;
 
 namespace ReduxTestHarness
 {
     internal sealed class ArtifactWriter
     {
+        private const long MaxBytesPerLog = 64L * 1024L * 1024L;
+        private const int MaxForbiddenLogMatches = 20;
         private static readonly JsonSerializerSettings JsonSettings =
             new JsonSerializerSettings
             {
@@ -22,12 +26,16 @@ namespace ReduxTestHarness
         private readonly string _gameRoot;
         private readonly string _scriptText;
         private readonly Stopwatch _stopwatch;
+        private readonly List<LogSourceSnapshot> _logSources;
+        private readonly List<ForbiddenLogPattern> _forbiddenLogPatterns =
+            new List<ForbiddenLogPattern>();
 
         public ArtifactWriter(
             string runId,
             string scriptPath,
             string scriptText,
-            string resultsRoot)
+            string resultsRoot,
+            bool includeStartupLogs)
         {
             _scriptText = scriptText;
             _gameRoot = ResolveGameRoot();
@@ -35,14 +43,22 @@ namespace ReduxTestHarness
 
             string timestamp = DateTime.Now.ToString("yyyy-MM-dd_HHmmss_fff");
             string scriptName = Path.GetFileNameWithoutExtension(scriptPath);
+            string runSuffix = Slug(runId);
+            if (runSuffix.Length > 12)
+            {
+                runSuffix = runSuffix.Substring(0, 12);
+            }
             ArtifactDirectory = Path.Combine(
                 Path.GetFullPath(resultsRoot),
-                timestamp,
+                timestamp + "_" + runSuffix,
                 Slug(scriptName));
             ScreenshotDirectory = Path.Combine(ArtifactDirectory, "screenshots");
+            AttachmentDirectory = Path.Combine(ArtifactDirectory, "attachments");
             LogDirectory = Path.Combine(ArtifactDirectory, "logs");
             Directory.CreateDirectory(ScreenshotDirectory);
+            Directory.CreateDirectory(AttachmentDirectory);
             Directory.CreateDirectory(LogDirectory);
+            _logSources = SnapshotLogSources(includeStartupLogs);
 
             Report = new TestReport
             {
@@ -59,6 +75,7 @@ namespace ReduxTestHarness
 
         public string ArtifactDirectory { get; private set; }
         public string ScreenshotDirectory { get; private set; }
+        public string AttachmentDirectory { get; private set; }
         public string LogDirectory { get; private set; }
         public string ReportPath { get { return Path.Combine(ArtifactDirectory, "report.json"); } }
         public TestReport Report { get; private set; }
@@ -73,14 +90,81 @@ namespace ReduxTestHarness
             AddRelativeUnique(Report.Screenshots, absolutePath);
         }
 
-        public void AddAttachment(string path)
+        public string AddAttachment(string path)
         {
             string absolute = Path.GetFullPath(path);
             if (!File.Exists(absolute) && !Directory.Exists(absolute))
             {
                 throw new FileNotFoundException("Attachment does not exist.", absolute);
             }
-            AddRelativeUnique(Report.Attachments, absolute);
+            if ((File.GetAttributes(absolute) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidOperationException(
+                    "Attachments cannot be links or reparse points: " + absolute);
+            }
+            if (string.Equals(
+                absolute.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                Path.GetFullPath(ArtifactDirectory).TrimEnd(
+                    Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "The result directory itself cannot be attached; attach a file or child directory.");
+            }
+
+            if (IsWithin(ArtifactDirectory, absolute))
+            {
+                AddRelativeUnique(Report.Attachments, absolute);
+                return absolute;
+            }
+
+            string copied;
+            if (File.Exists(absolute))
+            {
+                string stem = Slug(Path.GetFileNameWithoutExtension(absolute));
+                string extension = Path.GetExtension(absolute);
+                copied = UniquePath(AttachmentDirectory, stem, extension);
+                CopyFileShared(absolute, copied);
+            }
+            else
+            {
+                string stem = Slug(new DirectoryInfo(absolute).Name);
+                copied = UniqueDirectory(AttachmentDirectory, stem);
+                CopyDirectory(absolute, copied);
+            }
+            AddRelativeUnique(Report.Attachments, copied);
+            return copied;
+        }
+
+        public void AddWarning(string kind, string message)
+        {
+            Report.Warnings.Add(new TestError
+            {
+                Kind = kind,
+                Message = message,
+                StackTrace = null
+            });
+        }
+
+        public void AddForbiddenLogPattern(string pattern, string message)
+        {
+            if (string.IsNullOrWhiteSpace(pattern))
+            {
+                throw new ArgumentException("A non-empty log pattern is required.", "pattern");
+            }
+            var expression = new Regex(
+                pattern,
+                RegexOptions.CultureInvariant,
+                TimeSpan.FromSeconds(1));
+            _forbiddenLogPatterns.Add(new ForbiddenLogPattern
+            {
+                Pattern = pattern,
+                Message = string.IsNullOrWhiteSpace(message)
+                    ? "Forbidden log pattern matched: " + pattern
+                    : message,
+                Expression = expression
+            });
         }
 
         public void Complete(string status, Exception error)
@@ -99,6 +183,7 @@ namespace ReduxTestHarness
                 });
             }
             CollectLogs();
+            ScanLogsForForbiddenPatterns();
             Flush();
         }
 
@@ -134,26 +219,16 @@ namespace ReduxTestHarness
             builder.Append("Assertions: ").Append(passed).Append('/').Append(Report.Assertions.Count).AppendLine(" passed");
             builder.Append("Screenshots: ").AppendLine(Report.Screenshots.Count.ToString());
             builder.Append("Errors: ").AppendLine(Report.Errors.Count.ToString());
+            builder.Append("Warnings: ").AppendLine(Report.Warnings.Count.ToString());
             return builder.ToString();
         }
 
         private void CollectLogs()
         {
-            var candidates = new List<string>();
-            if (!string.IsNullOrEmpty(_gameRoot))
+            for (int index = 0; index < _logSources.Count; index++)
             {
-                candidates.Add(Path.Combine(_gameRoot, "Ksp2.log"));
-                candidates.Add(Path.Combine(_gameRoot, "BepInEx", "LogOutput.log"));
-            }
-
-            string localLow = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                "AppData", "LocalLow", "Intercept Games", "Kerbal Space Program 2", "Player.log");
-            candidates.Add(localLow);
-
-            for (int index = 0; index < candidates.Count; index++)
-            {
-                string source = candidates[index];
+                LogSourceSnapshot snapshot = _logSources[index];
+                string source = snapshot.Path;
                 if (!File.Exists(source))
                 {
                     continue;
@@ -164,18 +239,119 @@ namespace ReduxTestHarness
                         LogDirectory,
                         Path.GetFileNameWithoutExtension(source),
                         Path.GetExtension(source));
-                    File.Copy(source, destination, true);
+                    CopyLogSlice(snapshot, destination);
                     AddRelativeUnique(Report.Logs, destination);
                 }
                 catch (Exception copyError)
                 {
+                    if (_forbiddenLogPatterns.Count > 0)
+                    {
+                        Report.Errors.Add(new TestError
+                        {
+                            Kind = "log_collection",
+                            Message = "A required log could not be captured: " + copyError.Message,
+                            StackTrace = null
+                        });
+                        Report.Status = "failed";
+                    }
+                    else
+                    {
+                        AddWarning("log_collection", copyError.Message);
+                    }
+                }
+            }
+        }
+
+        private void ScanLogsForForbiddenPatterns()
+        {
+            if (_forbiddenLogPatterns.Count == 0)
+            {
+                return;
+            }
+            if (Report.Logs.Count == 0)
+            {
+                Report.Errors.Add(new TestError
+                {
+                    Kind = "log_collection",
+                    Message = "No KSP2 logs were available for the requested failure policy.",
+                    StackTrace = null
+                });
+                Report.Status = "failed";
+                return;
+            }
+
+            int matches = 0;
+            for (int logIndex = 0;
+                logIndex < Report.Logs.Count && matches < MaxForbiddenLogMatches;
+                logIndex++)
+            {
+                string relative = Report.Logs[logIndex].Replace('/', Path.DirectorySeparatorChar);
+                string path = Path.Combine(ArtifactDirectory, relative);
+                try
+                {
+                    using (var reader = new StreamReader(
+                        new FileStream(
+                            path,
+                            FileMode.Open,
+                            FileAccess.Read,
+                            FileShare.ReadWrite | FileShare.Delete),
+                        new UTF8Encoding(false),
+                        true,
+                        65536))
+                    {
+                        string line;
+                        int lineNumber = 0;
+                        while (matches < MaxForbiddenLogMatches &&
+                            (line = reader.ReadLine()) != null)
+                        {
+                            lineNumber++;
+                            for (int patternIndex = 0;
+                                patternIndex < _forbiddenLogPatterns.Count;
+                                patternIndex++)
+                            {
+                                ForbiddenLogPattern pattern =
+                                    _forbiddenLogPatterns[patternIndex];
+                                if (!pattern.Expression.IsMatch(line))
+                                {
+                                    continue;
+                                }
+                                Report.Errors.Add(new TestError
+                                {
+                                    Kind = "forbidden_log_match",
+                                    Message = pattern.Message + " (" +
+                                        Report.Logs[logIndex] + ":" + lineNumber + ")",
+                                    StackTrace = line
+                                });
+                                matches++;
+                                break;
+                            }
+                        }
+                    }
+                }
+                catch (Exception error)
+                {
                     Report.Errors.Add(new TestError
                     {
-                        Kind = "log_collection",
-                        Message = copyError.Message,
+                        Kind = error is RegexMatchTimeoutException
+                            ? "log_scan_timeout"
+                            : "log_scan",
+                        Message = "Could not scan '" + Report.Logs[logIndex] + "': " +
+                            error.Message,
                         StackTrace = null
                     });
+                    Report.Status = "failed";
                 }
+            }
+
+            if (matches > 0 && Report.Status == "passed")
+            {
+                Report.Status = "failed";
+            }
+            if (matches == MaxForbiddenLogMatches)
+            {
+                AddWarning(
+                    "log_scan_limit",
+                    "Forbidden log matches were capped at " + MaxForbiddenLogMatches + ".");
             }
         }
 
@@ -193,6 +369,38 @@ namespace ReduxTestHarness
                 gameAssembly.GetName().Version.ToString();
             environment.ReduxCommit = GetReduxCommit(reduxDisplayVersion) ??
                 GetInformationalVersion(gameAssembly);
+            PopulateMods(environment);
+        }
+
+        private static void PopulateMods(TestEnvironment environment)
+        {
+            try
+            {
+                IReadOnlyList<SpaceWarpPluginDescriptor> plugins =
+                    PluginList.AllEnabledAndActivePlugins;
+                for (int index = 0; index < plugins.Count; index++)
+                {
+                    SpaceWarpPluginDescriptor descriptor = plugins[index];
+                    if (descriptor == null)
+                    {
+                        continue;
+                    }
+                    ModInfo info = descriptor.SWInfo;
+                    environment.Mods.Add(new ModEnvironmentRecord
+                    {
+                        Id = info == null ? descriptor.Guid : info.ModID,
+                        Name = info == null ? descriptor.Name : info.Name,
+                        Version = info == null ? null : info.Version,
+                        Assembly = info == null ? null : info.MainAssembly
+                    });
+                }
+                environment.Mods.Sort((left, right) =>
+                    StringComparer.OrdinalIgnoreCase.Compare(left.Id, right.Id));
+            }
+            catch
+            {
+                // Environment collection must not prevent a test from starting.
+            }
         }
 
         private static string GetReduxDisplayVersion(Assembly gameAssembly)
@@ -239,10 +447,167 @@ namespace ReduxTestHarness
 
         private void AddRelativeUnique(List<string> target, string absolutePath)
         {
+            if (!IsWithin(ArtifactDirectory, absolutePath))
+            {
+                throw new InvalidOperationException(
+                    "Artifact paths must be contained by the current result directory: " +
+                    absolutePath);
+            }
             string relative = MakeRelative(ArtifactDirectory, absolutePath).Replace('\\', '/');
             if (!target.Contains(relative))
             {
                 target.Add(relative);
+            }
+        }
+
+        private List<LogSourceSnapshot> SnapshotLogSources(bool includeStartupLogs)
+        {
+            var candidates = new List<string>();
+            if (!string.IsNullOrEmpty(_gameRoot))
+            {
+                candidates.Add(Path.Combine(_gameRoot, "Ksp2.log"));
+                candidates.Add(Path.Combine(_gameRoot, "BepInEx", "LogOutput.log"));
+            }
+            candidates.Add(Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "AppData", "LocalLow", "Intercept Games",
+                "Kerbal Space Program 2", "Player.log"));
+
+            var snapshots = new List<LogSourceSnapshot>();
+            for (int index = 0; index < candidates.Count; index++)
+            {
+                string path = candidates[index];
+                long offset = 0;
+                if (!includeStartupLogs && File.Exists(path))
+                {
+                    try
+                    {
+                        offset = new FileInfo(path).Length;
+                    }
+                    catch
+                    {
+                        offset = 0;
+                    }
+                }
+                snapshots.Add(new LogSourceSnapshot { Path = path, Offset = offset });
+            }
+            return snapshots;
+        }
+
+        private void CopyLogSlice(LogSourceSnapshot snapshot, string destination)
+        {
+            using (var source = new FileStream(
+                snapshot.Path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete))
+            {
+                long end = source.Length;
+                long requestedStart = snapshot.Offset <= end ? snapshot.Offset : 0;
+                long start = requestedStart;
+                bool truncated = end - start > MaxBytesPerLog;
+                if (truncated)
+                {
+                    start = end - MaxBytesPerLog;
+                }
+
+                using (var output = new FileStream(
+                    destination,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.Read))
+                {
+                    if (truncated)
+                    {
+                        string notice =
+                            "[ReduxTestHarness] Earlier bytes from this test log were " +
+                            "truncated; retained the final " + MaxBytesPerLog + " bytes.\r\n";
+                        byte[] noticeBytes = new UTF8Encoding(false).GetBytes(notice);
+                        output.Write(noticeBytes, 0, noticeBytes.Length);
+                        AddWarning(
+                            "log_truncated",
+                            Path.GetFileName(snapshot.Path) + " exceeded the " +
+                            MaxBytesPerLog + " byte per-run capture limit.");
+                    }
+
+                    source.Position = start;
+                    CopyRange(source, output, end - start);
+                }
+            }
+        }
+
+        private static void CopyFileShared(string sourcePath, string destinationPath)
+        {
+            using (var source = new FileStream(
+                sourcePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete))
+            using (var destination = new FileStream(
+                destinationPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.Read))
+            {
+                source.CopyTo(destination);
+            }
+        }
+
+        private static void CopyRange(Stream source, Stream destination, long count)
+        {
+            var buffer = new byte[65536];
+            long remaining = count;
+            while (remaining > 0)
+            {
+                int read = source.Read(
+                    buffer,
+                    0,
+                    (int)Math.Min(buffer.Length, remaining));
+                if (read <= 0)
+                {
+                    break;
+                }
+                destination.Write(buffer, 0, read);
+                remaining -= read;
+            }
+        }
+
+        private static void CopyDirectory(string sourceRoot, string destinationRoot)
+        {
+            var pending = new Stack<KeyValuePair<string, string>>();
+            pending.Push(new KeyValuePair<string, string>(sourceRoot, destinationRoot));
+            while (pending.Count > 0)
+            {
+                KeyValuePair<string, string> current = pending.Pop();
+                Directory.CreateDirectory(current.Value);
+
+                string[] directories = Directory.GetDirectories(current.Key);
+                for (int index = 0; index < directories.Length; index++)
+                {
+                    if ((File.GetAttributes(directories[index]) & FileAttributes.ReparsePoint) != 0)
+                    {
+                        throw new InvalidOperationException(
+                            "Attachment directories cannot contain links or reparse points: " +
+                            directories[index]);
+                    }
+                    pending.Push(new KeyValuePair<string, string>(
+                        directories[index],
+                        Path.Combine(current.Value, Path.GetFileName(directories[index]))));
+                }
+
+                string[] files = Directory.GetFiles(current.Key);
+                for (int index = 0; index < files.Length; index++)
+                {
+                    if ((File.GetAttributes(files[index]) & FileAttributes.ReparsePoint) != 0)
+                    {
+                        throw new InvalidOperationException(
+                            "Attachment directories cannot contain links or reparse points: " +
+                            files[index]);
+                    }
+                    CopyFileShared(
+                        files[index],
+                        Path.Combine(current.Value, Path.GetFileName(files[index])));
+                }
             }
         }
 
@@ -264,6 +629,18 @@ namespace ReduxTestHarness
             while (File.Exists(candidate))
             {
                 candidate = Path.Combine(directory, stem + "-" + suffix + extension);
+                suffix++;
+            }
+            return candidate;
+        }
+
+        private static string UniqueDirectory(string directory, string stem)
+        {
+            string candidate = Path.Combine(directory, stem);
+            int suffix = 2;
+            while (Directory.Exists(candidate) || File.Exists(candidate))
+            {
+                candidate = Path.Combine(directory, stem + "-" + suffix);
                 suffix++;
             }
             return candidate;
@@ -291,7 +668,19 @@ namespace ReduxTestHarness
                     dash = true;
                 }
             }
-            return builder.ToString().Trim('-');
+            string slug = builder.ToString().Trim('-');
+            return slug.Length == 0 ? "test" : slug;
+        }
+
+        private static bool IsWithin(string root, string path)
+        {
+            string rootPrefix = AppendSeparator(Path.GetFullPath(root));
+            string fullPath = Path.GetFullPath(path);
+            return fullPath.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(
+                    fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                    rootPrefix.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                    StringComparison.OrdinalIgnoreCase);
         }
 
         private static string MakeRelative(string root, string path)
@@ -320,6 +709,19 @@ namespace ReduxTestHarness
             {
                 File.Move(temporary, path);
             }
+        }
+
+        private sealed class LogSourceSnapshot
+        {
+            public string Path;
+            public long Offset;
+        }
+
+        private sealed class ForbiddenLogPattern
+        {
+            public string Pattern;
+            public string Message;
+            public Regex Expression;
         }
     }
 }

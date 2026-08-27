@@ -18,8 +18,19 @@ namespace ReduxTestHarness
     {
         private readonly Dictionary<string, object> _renderValues =
             new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, object> _renderRestoreValues =
+            new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
         private CameraRequest _cameraRequest;
         private VesselComponent _cameraTarget;
+        private Camera _overriddenCamera;
+        private Vector3 _originalCameraPosition;
+        private Quaternion _originalCameraRotation;
+        private float _originalCameraFov;
+        private bool _testSessionActive;
+        private bool _restorePauseState;
+        private bool _initialPauseState;
+        private bool _restoreCameraMode;
+        private CameraMode _initialCameraMode;
 
         private GameInstance Game
         {
@@ -65,6 +76,89 @@ namespace ReduxTestHarness
                 GameInstance game = Game;
                 return game != null && game.UniverseModel != null && game.UniverseModel.IsTimePaused;
             }
+        }
+
+        public void BeginTestSession()
+        {
+            if (_testSessionActive)
+            {
+                throw new InvalidOperationException("A KSP2 test session is already active.");
+            }
+            _testSessionActive = true;
+            _renderValues.Clear();
+            _renderRestoreValues.Clear();
+            ClearCameraOverride();
+
+            GameInstance game = Game;
+            _restorePauseState = game != null && game.UniverseModel != null;
+            _initialPauseState = _restorePauseState && game.UniverseModel.IsTimePaused;
+            _restoreCameraMode = false;
+        }
+
+        public List<string> EndTestSession()
+        {
+            var warnings = new List<string>();
+            ClearCameraOverride();
+            if (!_testSessionActive)
+            {
+                return warnings;
+            }
+            _testSessionActive = false;
+
+            GraphicsSettings settings = null;
+            try
+            {
+                settings = RequireGraphicsSettings();
+            }
+            catch (Exception error)
+            {
+                if (_renderRestoreValues.Count > 0)
+                {
+                    warnings.Add("Could not restore graphics settings: " + error.Message);
+                }
+            }
+
+            if (settings != null)
+            {
+                RestoreRenderSettings(settings, warnings);
+            }
+            if (_restorePauseState)
+            {
+                try
+                {
+                    GameInstance game = Game;
+                    if (game != null && game.UniverseModel != null)
+                    {
+                        game.UniverseModel.SetTimePaused(_initialPauseState, true);
+                    }
+                }
+                catch (Exception error)
+                {
+                    warnings.Add("Could not restore the initial pause state: " + error.Message);
+                }
+            }
+
+            if (_restoreCameraMode)
+            {
+                try
+                {
+                    GameInstance game = Game;
+                    if (game != null && game.CameraManager != null)
+                    {
+                        game.CameraManager.SelectFlightCameraMode(_initialCameraMode);
+                    }
+                }
+                catch (Exception error)
+                {
+                    warnings.Add("Could not restore the initial flight camera mode: " + error.Message);
+                }
+            }
+
+            _restorePauseState = false;
+            _restoreCameraMode = false;
+            _renderRestoreValues.Clear();
+            _renderValues.Clear();
+            return warnings;
         }
 
         public void SetPaused(bool paused)
@@ -192,9 +286,16 @@ namespace ReduxTestHarness
 
         public void SetThrottle(double throttle)
         {
+            RequireFinite(throttle, "throttle");
+            if (throttle < 0.0 || throttle > 1.0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    "throttle",
+                    "Throttle must be between 0.0 and 1.0.");
+            }
             VesselComponent vessel = RequireActiveVessel();
             FlightCtrlState state = vessel.flightCtrlState;
-            state.mainThrottle = Mathf.Clamp01((float)throttle);
+            state.mainThrottle = (float)throttle;
             vessel.SetFlightControlState(state, false);
         }
 
@@ -231,6 +332,11 @@ namespace ReduxTestHarness
         public void SetCameraMode(string mode)
         {
             UniverseCameraManager manager = RequireGame().CameraManager;
+            if (_testSessionActive && !_restoreCameraMode)
+            {
+                _initialCameraMode = manager.GetFlightCameraMode();
+                _restoreCameraMode = true;
+            }
             CameraMode selected;
             if (string.Equals(mode, "Flight", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(mode, "Auto", StringComparison.OrdinalIgnoreCase))
@@ -251,16 +357,39 @@ namespace ReduxTestHarness
 
         public void SetOrbitCamera(double distance, double yaw, double pitch, double fov)
         {
+            RequireFinite(distance, "camera distance");
+            RequireFinite(yaw, "camera yaw");
+            RequireFinite(pitch, "camera pitch");
+            RequireFinite(fov, "camera fov");
+            if (distance <= 0.0)
+            {
+                throw new ArgumentOutOfRangeException("distance", "Camera distance must be positive.");
+            }
+            ValidateFov(fov);
+            float floatDistance = (float)distance;
+            float floatYaw = (float)yaw;
+            float floatPitch = (float)pitch;
+            RequireFinite(floatDistance, "camera distance");
+            RequireFinite(floatYaw, "camera yaw");
+            RequireFinite(floatPitch, "camera pitch");
             if (_cameraTarget == null)
             {
                 TargetActiveVessel();
             }
             _cameraRequest = CameraRequest.Orbit(
-                (float)distance, (float)yaw, (float)pitch, (float)fov);
+                floatDistance, floatYaw, floatPitch, (float)fov);
         }
 
         public void SetCamera(Vector3 position, Vector3 rotation, float fov)
         {
+            RequireFinite(position.x, "camera position.x");
+            RequireFinite(position.y, "camera position.y");
+            RequireFinite(position.z, "camera position.z");
+            RequireFinite(rotation.x, "camera rotation.x");
+            RequireFinite(rotation.y, "camera rotation.y");
+            RequireFinite(rotation.z, "camera rotation.z");
+            RequireFinite(fov, "camera fov");
+            ValidateFov(fov);
             if (_cameraTarget == null)
             {
                 TargetActiveVessel();
@@ -270,6 +399,7 @@ namespace ReduxTestHarness
 
         public void ClearCameraOverride()
         {
+            RestoreOverriddenCamera();
             _cameraRequest = null;
             _cameraTarget = null;
         }
@@ -291,6 +421,15 @@ namespace ReduxTestHarness
             if (behavior == null || camera == null)
             {
                 return;
+            }
+
+            if (_overriddenCamera != camera)
+            {
+                RestoreOverriddenCamera();
+                _overriddenCamera = camera;
+                _originalCameraPosition = camera.transform.position;
+                _originalCameraRotation = camera.transform.rotation;
+                _originalCameraFov = camera.fieldOfView;
             }
 
             Vector3 target = behavior.transform.position;
@@ -315,6 +454,24 @@ namespace ReduxTestHarness
             camera.fieldOfView = _cameraRequest.Fov;
         }
 
+        private void RestoreOverriddenCamera()
+        {
+            if (_overriddenCamera != null)
+            {
+                try
+                {
+                    _overriddenCamera.transform.position = _originalCameraPosition;
+                    _overriddenCamera.transform.rotation = _originalCameraRotation;
+                    _overriddenCamera.fieldOfView = _originalCameraFov;
+                }
+                catch
+                {
+                    // The camera may have been destroyed during a scene transition.
+                }
+            }
+            _overriddenCamera = null;
+        }
+
         public void SetRenderSetting(string name, object value)
         {
             if (string.IsNullOrWhiteSpace(name))
@@ -327,10 +484,16 @@ namespace ReduxTestHarness
             if (string.Equals(key, "supersampling", StringComparison.OrdinalIgnoreCase))
             {
                 double factor = Convert.ToDouble(value, CultureInfo.InvariantCulture);
-                if (factor < 0.25 || factor > 4.0)
+                RequireFinite(factor, "supersampling");
+                if (factor < 1.0 || factor > 2.0)
                 {
-                    throw new ArgumentOutOfRangeException("value", "supersampling must be between 0.25 and 4.0.");
+                    throw new ArgumentOutOfRangeException(
+                        "value",
+                        "KSP2 Redux supports supersampling factors from 1.0 through 2.0.");
                 }
+                RememberRenderValue(
+                    "renderScalePercent",
+                    PersistentProfileManager.RenderScalePercent);
                 settings.SetRenderScalePercent((int)Math.Round(factor * 100.0));
                 _renderValues[key] = factor;
                 return;
@@ -338,6 +501,9 @@ namespace ReduxTestHarness
             if (string.Equals(key, "taa", StringComparison.OrdinalIgnoreCase))
             {
                 bool enabled = Convert.ToBoolean(value, CultureInfo.InvariantCulture);
+                RememberRenderValue(
+                    "antiAliasingLevel",
+                    PersistentProfileManager.AntiAliasing);
                 settings.SetAntiAliasing(enabled ? 3 : 0);
                 _renderValues[key] = enabled;
                 return;
@@ -345,6 +511,7 @@ namespace ReduxTestHarness
             if (string.Equals(key, "clouds", StringComparison.OrdinalIgnoreCase))
             {
                 bool enabled = Convert.ToBoolean(value, CultureInfo.InvariantCulture);
+                RememberRenderValue("clouds", settings.GetEnableClouds());
                 settings.EnableClouds(enabled);
                 _renderValues[key] = enabled;
                 return;
@@ -352,6 +519,13 @@ namespace ReduxTestHarness
             if (string.Equals(key, "cloudQuality", StringComparison.OrdinalIgnoreCase))
             {
                 int quality = ParseQuality(value);
+                if (quality < 0 || quality > 3)
+                {
+                    throw new ArgumentOutOfRangeException(
+                        "value",
+                        "cloudQuality must be Low, Medium, High, Ultra, or 0 through 3.");
+                }
+                RememberRenderValue("cloudQuality", settings.GetCloudQuality());
                 settings.SetCloudQuality(quality);
                 _renderValues[key] = value;
                 return;
@@ -359,12 +533,26 @@ namespace ReduxTestHarness
             if (string.Equals(key, "vfxQuality", StringComparison.OrdinalIgnoreCase))
             {
                 int quality = ParseQuality(value);
+                if (quality < 0 || quality >= QualitySettings.names.Length)
+                {
+                    throw new ArgumentOutOfRangeException(
+                        "value",
+                        "vfxQuality must select an available Unity quality level.");
+                }
+                RememberRenderValue("vfxQuality", QualitySettings.GetQualityLevel());
                 QualitySettings.SetQualityLevel(quality, true);
                 _renderValues[key] = value;
                 return;
             }
             if (value is bool)
             {
+                bool original = false;
+                if (!settings.GetBoolSetting(key, ref original))
+                {
+                    throw new ArgumentException(
+                        "KSP2 does not expose a boolean graphics setting named '" + key + "'.");
+                }
+                RememberRenderValue("bool:" + key, original);
                 settings.SetBoolSetting(key, (bool)value);
                 _renderValues[key] = value;
                 return;
@@ -372,6 +560,56 @@ namespace ReduxTestHarness
             throw new ArgumentException(
                 "Unsupported rendering setting '" + name +
                 "'. Supported MVP settings: supersampling, taa, clouds, cloudQuality, vfxQuality, and KSP boolean settings.");
+        }
+
+        private void RememberRenderValue(string key, object value)
+        {
+            if (_testSessionActive && !_renderRestoreValues.ContainsKey(key))
+            {
+                _renderRestoreValues.Add(key, value);
+            }
+        }
+
+        private void RestoreRenderSettings(
+            GraphicsSettings settings,
+            List<string> warnings)
+        {
+            foreach (KeyValuePair<string, object> pair in _renderRestoreValues)
+            {
+                try
+                {
+                    switch (pair.Key)
+                    {
+                        case "renderScalePercent":
+                            settings.SetRenderScalePercent((int)pair.Value);
+                            break;
+                        case "antiAliasingLevel":
+                            settings.SetAntiAliasing((int)pair.Value);
+                            break;
+                        case "clouds":
+                            settings.EnableClouds((bool)pair.Value);
+                            break;
+                        case "cloudQuality":
+                            settings.SetCloudQuality((int)pair.Value);
+                            break;
+                        case "vfxQuality":
+                            QualitySettings.SetQualityLevel((int)pair.Value, true);
+                            break;
+                        default:
+                            if (pair.Key.StartsWith("bool:", StringComparison.Ordinal))
+                            {
+                                settings.SetBoolSetting(pair.Key.Substring(5), (bool)pair.Value);
+                            }
+                            break;
+                    }
+                }
+                catch (Exception error)
+                {
+                    warnings.Add(
+                        "Could not restore render setting '" + pair.Key + "': " +
+                        error.Message);
+                }
+            }
         }
 
         public object GetRenderSetting(string name)
@@ -383,6 +621,14 @@ namespace ReduxTestHarness
             }
 
             GraphicsSettings settings = RequireGraphicsSettings();
+            if (string.Equals(name, "supersampling", StringComparison.OrdinalIgnoreCase))
+            {
+                return PersistentProfileManager.RenderScalePercent / 100.0;
+            }
+            if (string.Equals(name, "taa", StringComparison.OrdinalIgnoreCase))
+            {
+                return PersistentProfileManager.AntiAliasing == 3;
+            }
             if (string.Equals(name, "clouds", StringComparison.OrdinalIgnoreCase))
             {
                 return settings.GetEnableClouds();
@@ -390,6 +636,10 @@ namespace ReduxTestHarness
             if (string.Equals(name, "cloudQuality", StringComparison.OrdinalIgnoreCase))
             {
                 return settings.GetCloudQuality();
+            }
+            if (string.Equals(name, "vfxQuality", StringComparison.OrdinalIgnoreCase))
+            {
+                return QualitySettings.GetQualityLevel();
             }
             bool boolean = false;
             if (settings.GetBoolSetting(name, ref boolean))
@@ -435,13 +685,27 @@ namespace ReduxTestHarness
             {
                 throw new ArgumentException("Fixture name is required.");
             }
-            string basePath = Path.IsPathRooted(fixture)
-                ? fixture
-                : Path.Combine(root, fixture.Replace('/', Path.DirectorySeparatorChar));
+            if (Path.IsPathRooted(fixture))
+            {
+                throw new ArgumentException(
+                    "Fixture names must be relative to the configured fixtures directory.");
+            }
+            string rootPath = Path.GetFullPath(root);
+            string rootPrefix = rootPath.TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            string basePath = Path.Combine(
+                rootPath,
+                fixture.Replace('/', Path.DirectorySeparatorChar));
             string[] candidates = { basePath, basePath + ".json", basePath + ".json.gz" };
             for (int index = 0; index < candidates.Length; index++)
             {
                 string full = Path.GetFullPath(candidates[index]);
+                if (!full.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new UnauthorizedAccessException(
+                        "Fixture path escapes the configured fixtures directory: " + fixture);
+                }
                 if (File.Exists(full))
                 {
                     return full;
@@ -518,6 +782,24 @@ namespace ReduxTestHarness
                 }
             }
             return Convert.ToInt32(value, CultureInfo.InvariantCulture);
+        }
+
+        private static void ValidateFov(double fov)
+        {
+            if (fov < 1.0 || fov > 179.0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    "fov",
+                    "Camera field of view must be between 1 and 179 degrees.");
+            }
+        }
+
+        private static void RequireFinite(double value, string name)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+            {
+                throw new ArgumentException(name + " must be a finite number.", name);
+            }
         }
 
         private sealed class CameraRequest

@@ -12,6 +12,7 @@ namespace ReduxTestHarness
 {
     internal sealed class JsonLineBridgeServer : IDisposable
     {
+        private const int MaxRequestCharacters = 4 * 1024 * 1024;
         private readonly ConcurrentQueue<BridgeCommand> _commands =
             new ConcurrentQueue<BridgeCommand>();
         private readonly Action<string> _log;
@@ -77,6 +78,8 @@ namespace ReduxTestHarness
 
         private void HandleClient(TcpClient client, CancellationToken cancellation)
         {
+            client.ReceiveTimeout = 30000;
+            client.SendTimeout = 30000;
             using (client)
             using (NetworkStream stream = client.GetStream())
             using (var reader = new StreamReader(
@@ -87,7 +90,7 @@ namespace ReduxTestHarness
                 writer.AutoFlush = true;
                 try
                 {
-                    string line = reader.ReadLine();
+                    string line = ReadLineLimited(reader, MaxRequestCharacters);
                     if (string.IsNullOrWhiteSpace(line))
                     {
                         writer.WriteLine(Error("empty_request", "Request must be one JSON object.").ToString(Newtonsoft.Json.Formatting.None));
@@ -115,12 +118,18 @@ namespace ReduxTestHarness
                     var completed = new ManualResetEventSlim(false);
                     JObject response = null;
                     int completionCount = 0;
+                    int abandoned = 0;
                     _commands.Enqueue(new BridgeCommand
                     {
                         Command = commandName,
                         Payload = payload,
+                        IsAbandoned = () => Volatile.Read(ref abandoned) != 0,
                         Complete = value =>
                         {
+                            if (Volatile.Read(ref abandoned) != 0)
+                            {
+                                return;
+                            }
                             if (Interlocked.Exchange(ref completionCount, 1) != 0)
                             {
                                 return;
@@ -132,6 +141,7 @@ namespace ReduxTestHarness
 
                     if (!completed.Wait(TimeSpan.FromSeconds(30), cancellation))
                     {
+                        Interlocked.Exchange(ref abandoned, 1);
                         response = Error("command_timeout", "The game main thread did not process the command in time.");
                     }
                     writer.WriteLine((response ?? Error("no_response", "Command produced no response."))
@@ -150,6 +160,25 @@ namespace ReduxTestHarness
                     {
                     }
                 }
+            }
+        }
+
+        private static string ReadLineLimited(TextReader reader, int maximumCharacters)
+        {
+            var builder = new StringBuilder(Math.Min(4096, maximumCharacters));
+            while (true)
+            {
+                int value = reader.Read();
+                if (value < 0 || value == '\n')
+                {
+                    return builder.ToString().TrimEnd('\r');
+                }
+                if (builder.Length >= maximumCharacters)
+                {
+                    throw new InvalidDataException(
+                        "Request exceeds the " + maximumCharacters + " character limit.");
+                }
+                builder.Append((char)value);
             }
         }
 

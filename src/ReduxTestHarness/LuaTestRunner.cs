@@ -6,12 +6,17 @@ using System.IO;
 using KSP.Game;
 using KSP.ScriptInterop;
 using MoonSharp.Interpreter;
+using SpaceWarp2.API.Mods;
+using SpaceWarp2.API.Mods.JSON;
 using UnityEngine;
 
 namespace ReduxTestHarness
 {
     internal sealed class LuaTestRunner
     {
+        private const string DefaultLogErrorPattern =
+            @"(?:\bNullReferenceException\b|\bMissingMethodException\b|" +
+            @"\bTypeLoadException\b|\bUnhandled Exception\b|^\[EXC )";
         private static readonly DynValue[] NoValues = new DynValue[0];
 
         private readonly MonoBehaviour _owner;
@@ -19,7 +24,8 @@ namespace ReduxTestHarness
         private readonly string _fixturesRoot;
         private readonly DateTime _deadlineUtc;
         private readonly ArtifactWriter _artifacts;
-        private readonly Action<string> _log;
+        private readonly Action<string> _infoLog;
+        private readonly Action<string> _errorLog;
         private Script _script;
         private MoonSharp.Interpreter.Coroutine _coroutine;
         private Func<bool> _pendingCondition;
@@ -28,6 +34,7 @@ namespace ReduxTestHarness
         private float _pendingDeadline;
         private bool _finished;
         private Exception _terminalError;
+        private CaptureState _activeCapture;
 
         public LuaTestRunner(
             MonoBehaviour owner,
@@ -38,17 +45,33 @@ namespace ReduxTestHarness
             string resultsRoot,
             string fixturesRoot,
             int timeoutSeconds,
-            Action<string> log)
+            bool includeStartupLogs,
+            bool failOnLogErrors,
+            Action<string> infoLog,
+            Action<string> errorLog)
         {
             _owner = owner;
             _game = game;
             _fixturesRoot = Path.GetFullPath(fixturesRoot);
             _deadlineUtc = DateTime.UtcNow.AddSeconds(timeoutSeconds);
-            _artifacts = new ArtifactWriter(runId, scriptPath, scriptText, resultsRoot);
-            _log = log;
+            _artifacts = new ArtifactWriter(
+                runId,
+                scriptPath,
+                scriptText,
+                resultsRoot,
+                includeStartupLogs);
+            _infoLog = infoLog;
+            _errorLog = errorLog;
 
             try
             {
+                _game.BeginTestSession();
+                if (failOnLogErrors)
+                {
+                    _artifacts.AddForbiddenLogPattern(
+                        DefaultLogErrorPattern,
+                        "A Unity/KSP exception was written during the test");
+                }
                 InitializeScript(scriptText, scriptPath);
             }
             catch (Exception error)
@@ -170,6 +193,8 @@ namespace ReduxTestHarness
             }
 
             _script = environment.script;
+            _script.Options.DebugPrint = message =>
+                _infoLog("[Lua] " + (message ?? string.Empty));
             Table globals = environment.globals;
             globals.Set("Test", DynValue.NewTable(CreateTestApi()));
             DynValue function = _script.LoadString(scriptText, globals, scriptPath);
@@ -184,7 +209,7 @@ namespace ReduxTestHarness
             var test = new Table(_script);
             SetCallback(test, "name", (context, args) =>
             {
-                _artifacts.Report.Name = RequiredString(args, 0, "Test.name");
+                _artifacts.Report.Name = RequiredNonEmptyString(args, 0, "Test.name");
                 _artifacts.Flush();
                 return DynValue.Nil;
             });
@@ -194,6 +219,7 @@ namespace ReduxTestHarness
             test.Set("wait", DynValue.NewTable(CreateWaitApi()));
             test.Set("camera", DynValue.NewTable(CreateCameraApi()));
             test.Set("render", DynValue.NewTable(CreateRenderApi()));
+            test.Set("mod", DynValue.NewTable(CreateModApi()));
             test.Set("capture", DynValue.NewTable(CreateCaptureApi()));
             test.Set("assert", DynValue.NewTable(CreateAssertApi()));
             test.Set("report", DynValue.NewTable(CreateReportApi()));
@@ -207,7 +233,7 @@ namespace ReduxTestHarness
             SetCallback(api, "is_ready", (context, args) => DynValue.NewBoolean(_game.IsReady));
             SetCallback(api, "load_save", (context, args) =>
             {
-                string fixture = RequiredString(args, 0, "Test.game.load_save");
+                string fixture = RequiredNonEmptyString(args, 0, "Test.game.load_save");
                 bool completed = false;
                 bool success = false;
                 string error = null;
@@ -220,7 +246,7 @@ namespace ReduxTestHarness
                     completed = true;
                 });
                 return YieldUntil(
-                    () => completed,
+                    () => completed && (!success || _game.IsReady),
                     90.0f,
                     "save fixture '" + fixture + "'",
                     () =>
@@ -234,8 +260,12 @@ namespace ReduxTestHarness
             });
             SetCallback(api, "wait_for_state", (context, args) =>
             {
-                string state = RequiredString(args, 0, "Test.game.wait_for_state");
-                float timeout = OptionalNumber(args, 1, 30.0f);
+                string state = RequiredNonEmptyString(args, 0, "Test.game.wait_for_state");
+                float timeout = OptionalPositiveNumber(
+                    args,
+                    1,
+                    30.0f,
+                    "Test.game.wait_for_state");
                 return YieldUntil(
                     () => string.Equals(_game.State, state, StringComparison.OrdinalIgnoreCase),
                     timeout,
@@ -260,7 +290,7 @@ namespace ReduxTestHarness
             var api = new Table(_script);
             SetCallback(api, "start", (context, args) =>
             {
-                string name = RequiredString(args, 0, "Test.flight.start");
+                string name = RequiredNonEmptyString(args, 0, "Test.flight.start");
                 KSP.Sim.impl.VesselComponent vessel = _game.FindVessel(name);
                 if (vessel == null)
                 {
@@ -286,12 +316,15 @@ namespace ReduxTestHarness
             {
                 Table snapshot = _game.VesselSnapshot(
                     _script,
-                    _game.FindVessel(RequiredString(args, 0, "Test.flight.find_vessel")));
+                    _game.FindVessel(RequiredNonEmptyString(args, 0, "Test.flight.find_vessel")));
                 return snapshot == null ? DynValue.Nil : DynValue.NewTable(snapshot);
             });
             SetCallback(api, "set_throttle", (context, args) =>
             {
-                _game.SetThrottle(RequiredNumber(args, 0, "Test.flight.set_throttle"));
+                _game.SetThrottle(RequiredFiniteNumber(
+                    args,
+                    0,
+                    "Test.flight.set_throttle"));
                 return DynValue.Nil;
             });
             SetCallback(api, "stage", (context, args) =>
@@ -312,7 +345,12 @@ namespace ReduxTestHarness
             var api = new Table(_script);
             SetCallback(api, "frames", (context, args) =>
             {
-                int frames = (int)Math.Max(0, RequiredNumber(args, 0, "Test.wait.frames"));
+                int frames = RequiredInteger(
+                    args,
+                    0,
+                    "Test.wait.frames",
+                    0,
+                    1000000);
                 int target = Time.frameCount + frames;
                 return YieldUntil(
                     () => Time.frameCount >= target,
@@ -322,7 +360,15 @@ namespace ReduxTestHarness
             });
             SetCallback(api, "seconds", (context, args) =>
             {
-                float seconds = (float)Math.Max(0.0, RequiredNumber(args, 0, "Test.wait.seconds"));
+                float seconds = (float)RequiredFiniteNumber(
+                    args,
+                    0,
+                    "Test.wait.seconds");
+                if (seconds < 0.0f || seconds > 86400.0f)
+                {
+                    throw new ScriptRuntimeException(
+                        "Test.wait.seconds must be between 0 and 86400.");
+                }
                 float target = Time.realtimeSinceStartup + seconds;
                 return YieldUntil(
                     () => Time.realtimeSinceStartup >= target,
@@ -333,7 +379,11 @@ namespace ReduxTestHarness
             Func<ScriptExecutionContext, CallbackArguments, DynValue> waitUntil = (context, args) =>
             {
                 DynValue predicate = RequiredFunction(args, 0, "Test.wait.until");
-                float timeout = OptionalNumber(args, 1, 30.0f);
+                float timeout = OptionalPositiveNumber(
+                    args,
+                    1,
+                    30.0f,
+                    "Test.wait.until");
                 return YieldUntil(
                     () => _script.Call(predicate).CastToBool(),
                     timeout,
@@ -350,7 +400,7 @@ namespace ReduxTestHarness
             var api = new Table(_script);
             SetCallback(api, "mode", (context, args) =>
             {
-                _game.SetCameraMode(RequiredString(args, 0, "Test.camera.mode"));
+                _game.SetCameraMode(RequiredNonEmptyString(args, 0, "Test.camera.mode"));
                 return DynValue.Nil;
             });
             SetCallback(api, "target_vessel", (context, args) =>
@@ -384,18 +434,25 @@ namespace ReduxTestHarness
             var api = new Table(_script);
             SetCallback(api, "set", (context, args) =>
             {
-                string name = RequiredString(args, 0, "Test.render.set");
+                string name = RequiredNonEmptyString(args, 0, "Test.render.set");
                 _game.SetRenderSetting(name, ToPlainValue(RequiredArgument(args, 1, "Test.render.set")));
                 return DynValue.Nil;
             });
             SetCallback(api, "get", (context, args) =>
             {
-                object value = _game.GetRenderSetting(RequiredString(args, 0, "Test.render.get"));
+                object value = _game.GetRenderSetting(RequiredNonEmptyString(args, 0, "Test.render.get"));
                 return value == null ? DynValue.Nil : DynValue.FromObject(_script, value);
             });
             SetCallback(api, "wait_stable", (context, args) =>
             {
-                int frames = args.Count == 0 ? 30 : (int)RequiredNumber(args, 0, "Test.render.wait_stable");
+                int frames = args.Count == 0
+                    ? 30
+                    : RequiredInteger(
+                        args,
+                        0,
+                        "Test.render.wait_stable",
+                        0,
+                        1000000);
                 int target = Time.frameCount + Math.Max(0, frames);
                 return YieldUntil(
                     () => Time.frameCount >= target,
@@ -406,27 +463,123 @@ namespace ReduxTestHarness
             return api;
         }
 
+        private Table CreateModApi()
+        {
+            var api = new Table(_script);
+            var extensions = new Table(_script);
+            TestApiRegistry.Populate(
+                _script,
+                extensions,
+                message => _artifacts.AddWarning("test_api_extension", message));
+            api.Set("extensions", DynValue.NewTable(extensions));
+
+            SetCallback(api, "is_loaded", (context, args) =>
+                DynValue.NewBoolean(FindActiveMod(
+                    RequiredNonEmptyString(args, 0, "Test.mod.is_loaded")) != null));
+            SetCallback(api, "info", (context, args) =>
+            {
+                SpaceWarpPluginDescriptor descriptor = FindActiveMod(
+                    RequiredNonEmptyString(args, 0, "Test.mod.info"));
+                return descriptor == null
+                    ? DynValue.Nil
+                    : DynValue.NewTable(ModSnapshot(descriptor));
+            });
+            SetCallback(api, "list", (context, args) =>
+            {
+                var result = new Table(_script);
+                IReadOnlyList<SpaceWarpPluginDescriptor> plugins =
+                    PluginList.AllEnabledAndActivePlugins;
+                for (int index = 0; index < plugins.Count; index++)
+                {
+                    result.Set(index + 1, DynValue.NewTable(ModSnapshot(plugins[index])));
+                }
+                return DynValue.NewTable(result);
+            });
+            SetCallback(api, "extension", (context, args) =>
+                extensions.Get(RequiredNonEmptyString(
+                    args,
+                    0,
+                    "Test.mod.extension")));
+            return api;
+        }
+
+        private SpaceWarpPluginDescriptor FindActiveMod(string id)
+        {
+            IReadOnlyList<SpaceWarpPluginDescriptor> plugins =
+                PluginList.AllEnabledAndActivePlugins;
+            for (int index = 0; index < plugins.Count; index++)
+            {
+                SpaceWarpPluginDescriptor descriptor = plugins[index];
+                if (descriptor == null)
+                {
+                    continue;
+                }
+                ModInfo info = descriptor.SWInfo;
+                if (string.Equals(descriptor.Guid, id, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(descriptor.Name, id, StringComparison.OrdinalIgnoreCase) ||
+                    (info != null &&
+                        (string.Equals(info.ModID, id, StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(info.Name, id, StringComparison.OrdinalIgnoreCase))))
+                {
+                    return descriptor;
+                }
+            }
+            return null;
+        }
+
+        private Table ModSnapshot(SpaceWarpPluginDescriptor descriptor)
+        {
+            var table = new Table(_script);
+            if (descriptor == null)
+            {
+                return table;
+            }
+            ModInfo info = descriptor.SWInfo;
+            SetPlain(table, "id", info == null ? descriptor.Guid : info.ModID);
+            SetPlain(table, "name", info == null ? descriptor.Name : info.Name);
+            SetPlain(table, "version", info == null ? null : info.Version);
+            SetPlain(table, "author", info == null ? null : info.Author);
+            SetPlain(table, "source", info == null ? null : info.Source);
+            SetPlain(table, "assembly", info == null ? null : info.MainAssembly);
+            SetPlain(table, "outdated", descriptor.Outdated);
+            SetPlain(table, "unsupported", descriptor.Unsupported);
+            return table;
+        }
+
         private Table CreateCaptureApi()
         {
             var api = new Table(_script);
             SetCallback(api, "screenshot", (context, args) =>
             {
-                string name = RequiredString(args, 0, "Test.capture.screenshot");
+                string name = RequiredNonEmptyString(args, 0, "Test.capture.screenshot");
                 int scale = 1;
                 bool hideUi = true;
                 int waitFrames = 0;
                 if (args.Count > 1 && args[1].Type != DataType.Nil && args[1].Type != DataType.Void)
                 {
                     Table options = RequiredTable(args, 1, "Test.capture.screenshot");
-                    scale = (int)OptionalFieldNumber(options, "scale", 1.0);
+                    scale = OptionalFieldInteger(
+                        options,
+                        "scale",
+                        1,
+                        1,
+                        4,
+                        "Test.capture.screenshot");
                     hideUi = OptionalFieldBoolean(options, "hideUI", true);
-                    waitFrames = (int)OptionalFieldNumber(options, "waitFrames", 0.0);
+                    waitFrames = OptionalFieldInteger(
+                        options,
+                        "waitFrames",
+                        0,
+                        0,
+                        3600,
+                        "Test.capture.screenshot");
                 }
 
                 var capture = new CaptureState
                 {
                     Path = _artifacts.NewScreenshotPath(name)
                 };
+                _activeCapture = capture;
                 _owner.StartCoroutine(CaptureScreenshot(capture, scale, hideUi, waitFrames));
                 return YieldUntil(
                     () => capture.Complete,
@@ -438,6 +591,7 @@ namespace ReduxTestHarness
                         {
                             throw capture.Error;
                         }
+                        _activeCapture = null;
                         return DynValue.NewString(capture.Path);
                     });
             });
@@ -471,23 +625,28 @@ namespace ReduxTestHarness
             });
             SetCallback(api, "near", (context, args) =>
             {
-                double actual = RequiredNumber(args, 0, "Test.assert.near");
-                double expected = RequiredNumber(args, 1, "Test.assert.near");
-                double tolerance = RequiredNumber(args, 2, "Test.assert.near");
+                double actual = RequiredFiniteNumber(args, 0, "Test.assert.near");
+                double expected = RequiredFiniteNumber(args, 1, "Test.assert.near");
+                double tolerance = RequiredFiniteNumber(args, 2, "Test.assert.near");
+                if (tolerance < 0.0)
+                {
+                    throw new ScriptRuntimeException(
+                        "Test.assert.near tolerance must be non-negative.");
+                }
                 return Assert(Math.Abs(actual - expected) <= tolerance,
                     "values are within " + tolerance.ToString(CultureInfo.InvariantCulture),
                     args, 3, actual, expected);
             });
             SetCallback(api, "greater", (context, args) =>
             {
-                double actual = RequiredNumber(args, 0, "Test.assert.greater");
-                double expected = RequiredNumber(args, 1, "Test.assert.greater");
+                double actual = RequiredFiniteNumber(args, 0, "Test.assert.greater");
+                double expected = RequiredFiniteNumber(args, 1, "Test.assert.greater");
                 return Assert(actual > expected, "actual > expected", args, 2, actual, expected);
             });
             SetCallback(api, "less", (context, args) =>
             {
-                double actual = RequiredNumber(args, 0, "Test.assert.less");
-                double expected = RequiredNumber(args, 1, "Test.assert.less");
+                double actual = RequiredFiniteNumber(args, 0, "Test.assert.less");
+                double expected = RequiredFiniteNumber(args, 1, "Test.assert.less");
                 return Assert(actual < expected, "actual < expected", args, 2, actual, expected);
             });
             return api;
@@ -502,30 +661,58 @@ namespace ReduxTestHarness
                 _artifacts.Flush();
                 return DynValue.Nil;
             });
+            SetCallback(api, "log", (context, args) =>
+            {
+                string message = RequiredString(args, 0, "Test.report.log");
+                _infoLog("[Lua] " + message);
+                return DynValue.Nil;
+            });
             SetCallback(api, "metric", (context, args) =>
             {
-                _artifacts.Report.Metrics[RequiredString(args, 0, "Test.report.metric")] =
-                    RequiredNumber(args, 1, "Test.report.metric");
+                _artifacts.Report.Metrics[RequiredNonEmptyString(args, 0, "Test.report.metric")] =
+                    RequiredFiniteNumber(args, 1, "Test.report.metric");
                 _artifacts.Flush();
                 return DynValue.Nil;
             });
             SetCallback(api, "value", (context, args) =>
             {
-                _artifacts.Report.Values[RequiredString(args, 0, "Test.report.value")] =
+                _artifacts.Report.Values[RequiredNonEmptyString(args, 0, "Test.report.value")] =
                     ToPlainValue(RequiredArgument(args, 1, "Test.report.value"));
                 _artifacts.Flush();
                 return DynValue.Nil;
             });
             SetCallback(api, "attach", (context, args) =>
             {
-                string path = RequiredString(args, 0, "Test.report.attach");
+                string path = RequiredNonEmptyString(args, 0, "Test.report.attach");
                 if (!Path.IsPathRooted(path))
                 {
                     path = Path.Combine(_artifacts.ArtifactDirectory, path);
                 }
-                _artifacts.AddAttachment(path);
+                string copied = _artifacts.AddAttachment(path);
                 _artifacts.Flush();
-                return DynValue.NewString(Path.GetFullPath(path));
+                return DynValue.NewString(copied);
+            });
+            SetCallback(api, "fail_on_log", (context, args) =>
+            {
+                string pattern = RequiredNonEmptyString(args, 0, "Test.report.fail_on_log");
+                string message = OptionalString(args, 1, null);
+                try
+                {
+                    _artifacts.AddForbiddenLogPattern(pattern, message);
+                }
+                catch (Exception error)
+                {
+                    throw new ScriptRuntimeException(
+                        "Test.report.fail_on_log pattern is invalid: " + error.Message);
+                }
+                return DynValue.Nil;
+            });
+            SetCallback(api, "fail_on_log_errors", (context, args) =>
+            {
+                _artifacts.AddForbiddenLogPattern(
+                    DefaultLogErrorPattern,
+                    "A Unity/KSP exception was written during the test");
+                return DynValue.Nil;
             });
             return api;
         }
@@ -542,6 +729,10 @@ namespace ReduxTestHarness
                 for (int frame = 0; frame < Math.Max(0, waitFrames); frame++)
                 {
                     yield return new WaitForEndOfFrame();
+                    if (capture.Cancelled)
+                    {
+                        yield break;
+                    }
                 }
 
                 if (hideUi)
@@ -559,6 +750,10 @@ namespace ReduxTestHarness
                 }
 
                 yield return new WaitForEndOfFrame();
+                if (capture.Cancelled)
+                {
+                    yield break;
+                }
                 try
                 {
                     _game.ApplyCameraOverride();
@@ -573,6 +768,10 @@ namespace ReduxTestHarness
                 for (int frame = 0; frame < 120; frame++)
                 {
                     yield return new WaitForEndOfFrame();
+                    if (capture.Cancelled)
+                    {
+                        yield break;
+                    }
                     bool ready = false;
                     try
                     {
@@ -603,6 +802,10 @@ namespace ReduxTestHarness
                     {
                         enabled[index].enabled = true;
                     }
+                }
+                if (ReferenceEquals(_activeCapture, capture) && capture.Complete)
+                {
+                    _activeCapture = null;
                 }
             }
         }
@@ -672,7 +875,7 @@ namespace ReduxTestHarness
         private void Fail(Exception error)
         {
             _terminalError = error;
-            _log("Test failed: " + error);
+            _errorLog("Test failed: " + error);
             Finish("failed");
         }
 
@@ -684,7 +887,24 @@ namespace ReduxTestHarness
             }
             _finished = true;
             ClearPending();
-            _game.ClearCameraOverride();
+            if (_activeCapture != null)
+            {
+                _activeCapture.Cancelled = true;
+            }
+            List<string> cleanupWarnings = _game.EndTestSession();
+            for (int index = 0; index < cleanupWarnings.Count; index++)
+            {
+                _artifacts.Report.Errors.Add(new TestError
+                {
+                    Kind = "test_cleanup",
+                    Message = cleanupWarnings[index],
+                    StackTrace = null
+                });
+            }
+            if (cleanupWarnings.Count > 0 && status == "passed")
+            {
+                status = "failed";
+            }
             _artifacts.Complete(status, _terminalError);
         }
 
@@ -696,9 +916,30 @@ namespace ReduxTestHarness
             _pendingDeadline = 0.0f;
         }
 
-        private static void SetCallback(Table table, string name, Func<ScriptExecutionContext, CallbackArguments, DynValue> callback)
+        private static void SetCallback(
+            Table table,
+            string name,
+            Func<ScriptExecutionContext, CallbackArguments, DynValue> callback)
         {
-            table.Set(name, DynValue.NewCallback(callback, "Test." + name));
+            table.Set(
+                name,
+                DynValue.NewCallback(
+                    (context, arguments) =>
+                    {
+                        try
+                        {
+                            return callback(context, arguments);
+                        }
+                        catch (ScriptRuntimeException)
+                        {
+                            throw;
+                        }
+                        catch (Exception error)
+                        {
+                            throw new ScriptRuntimeException(error.Message);
+                        }
+                    },
+                    "Test." + name));
         }
 
         private static DynValue RequiredArgument(CallbackArguments args, int index, string function)
@@ -720,6 +961,20 @@ namespace ReduxTestHarness
             return value.String;
         }
 
+        private static string RequiredNonEmptyString(
+            CallbackArguments args,
+            int index,
+            string function)
+        {
+            string value = RequiredString(args, index, function);
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                throw new ScriptRuntimeException(
+                    function + " argument " + (index + 1) + " must not be empty.");
+            }
+            return value;
+        }
+
         private static string OptionalString(CallbackArguments args, int index, string fallback)
         {
             if (args.Count <= index || args[index].IsNil())
@@ -739,6 +994,37 @@ namespace ReduxTestHarness
             return value.Number;
         }
 
+        private static double RequiredFiniteNumber(
+            CallbackArguments args,
+            int index,
+            string function)
+        {
+            double value = RequiredNumber(args, index, function);
+            if (!IsFinite(value))
+            {
+                throw new ScriptRuntimeException(
+                    function + " argument " + (index + 1) + " must be finite.");
+            }
+            return value;
+        }
+
+        private static int RequiredInteger(
+            CallbackArguments args,
+            int index,
+            string function,
+            int minimum,
+            int maximum)
+        {
+            double value = RequiredFiniteNumber(args, index, function);
+            if (value != Math.Truncate(value) || value < minimum || value > maximum)
+            {
+                throw new ScriptRuntimeException(
+                    function + " argument " + (index + 1) + " must be an integer from " +
+                    minimum + " through " + maximum + ".");
+            }
+            return (int)value;
+        }
+
         private static bool RequiredBoolean(CallbackArguments args, int index, string function)
         {
             DynValue value = RequiredArgument(args, index, function);
@@ -749,11 +1035,23 @@ namespace ReduxTestHarness
             return value.Boolean;
         }
 
-        private static float OptionalNumber(CallbackArguments args, int index, float fallback)
+        private static float OptionalPositiveNumber(
+            CallbackArguments args,
+            int index,
+            float fallback,
+            string function)
         {
-            return args.Count <= index || args[index].IsNil()
-                ? fallback
-                : (float)args[index].Number;
+            if (args.Count <= index || args[index].IsNil())
+            {
+                return fallback;
+            }
+            float value = (float)RequiredFiniteNumber(args, index, function);
+            if (value <= 0.0f || value > 86400.0f)
+            {
+                throw new ScriptRuntimeException(
+                    function + " timeout must be greater than 0 and at most 86400 seconds.");
+            }
+            return value;
         }
 
         private static Table RequiredTable(CallbackArguments args, int index, string function)
@@ -783,19 +1081,66 @@ namespace ReduxTestHarness
             {
                 throw new ScriptRuntimeException(function + " requires numeric field '" + field + "'.");
             }
+            if (!IsFinite(value.Number))
+            {
+                throw new ScriptRuntimeException(
+                    function + " field '" + field + "' must be finite.");
+            }
             return value.Number;
         }
 
         private static double OptionalFieldNumber(Table table, string field, double fallback)
         {
             DynValue value = table.Get(field);
-            return value.IsNil() ? fallback : value.Number;
+            if (value.IsNil())
+            {
+                return fallback;
+            }
+            if (value.Type != DataType.Number || !IsFinite(value.Number))
+            {
+                throw new ScriptRuntimeException(
+                    "Optional field '" + field + "' must be a finite number.");
+            }
+            return value.Number;
+        }
+
+        private static int OptionalFieldInteger(
+            Table table,
+            string field,
+            int fallback,
+            int minimum,
+            int maximum,
+            string function)
+        {
+            DynValue value = table.Get(field);
+            if (value.IsNil())
+            {
+                return fallback;
+            }
+            if (value.Type != DataType.Number || !IsFinite(value.Number) ||
+                value.Number != Math.Truncate(value.Number) ||
+                value.Number < minimum || value.Number > maximum)
+            {
+                throw new ScriptRuntimeException(
+                    function + " field '" + field + "' must be an integer from " +
+                    minimum + " through " + maximum + ".");
+            }
+            return (int)value.Number;
         }
 
         private static bool OptionalFieldBoolean(Table table, string field, bool fallback)
         {
             DynValue value = table.Get(field);
-            return value.IsNil() ? fallback : value.Boolean;
+            if (value.IsNil())
+            {
+                return fallback;
+            }
+            if (value.Type != DataType.Boolean)
+            {
+                throw new ScriptRuntimeException(
+                    "Optional field '" + field + "' must be a boolean.");
+            }
+            return value.Boolean;
         }
 
         private static Vector3 VectorField(Table table, string field)
@@ -805,17 +1150,27 @@ namespace ReduxTestHarness
             {
                 throw new ScriptRuntimeException("Camera field '" + field + "' must be a three-number array.");
             }
+            DynValue x = value.Table.Get(1);
+            DynValue y = value.Table.Get(2);
+            DynValue z = value.Table.Get(3);
+            if (x.Type != DataType.Number || y.Type != DataType.Number ||
+                z.Type != DataType.Number || !IsFinite(x.Number) ||
+                !IsFinite(y.Number) || !IsFinite(z.Number))
+            {
+                throw new ScriptRuntimeException(
+                    "Camera field '" + field + "' must be a finite three-number array.");
+            }
             return new Vector3(
-                (float)value.Table.Get(1).Number,
-                (float)value.Table.Get(2).Number,
-                (float)value.Table.Get(3).Number);
+                (float)x.Number,
+                (float)y.Number,
+                (float)z.Number);
         }
 
         private static bool DynEquals(DynValue left, DynValue right)
         {
             if (left.Type == DataType.Number && right.Type == DataType.Number)
             {
-                return left.Number.Equals(right.Number);
+                return left.Number == right.Number;
             }
             if (left.Type == DataType.String && right.Type == DataType.String)
             {
@@ -834,6 +1189,14 @@ namespace ReduxTestHarness
 
         private static object ToPlainValue(DynValue value)
         {
+            return ToPlainValue(value, 0, new HashSet<Table>());
+        }
+
+        private static object ToPlainValue(
+            DynValue value,
+            int depth,
+            HashSet<Table> visited)
+        {
             switch (value.Type)
             {
                 case DataType.Nil:
@@ -842,25 +1205,62 @@ namespace ReduxTestHarness
                 case DataType.Boolean:
                     return value.Boolean;
                 case DataType.Number:
-                    return value.Number;
+                    return IsFinite(value.Number)
+                        ? (object)value.Number
+                        : value.Number.ToString(CultureInfo.InvariantCulture);
                 case DataType.String:
                     return value.String;
                 case DataType.Table:
+                    if (depth >= 16)
+                    {
+                        throw new ScriptRuntimeException(
+                            "Report values may contain at most 16 nested Lua tables.");
+                    }
+                    if (!visited.Add(value.Table))
+                    {
+                        throw new ScriptRuntimeException(
+                            "Report values cannot contain cyclic Lua tables.");
+                    }
                     var dictionary = new Dictionary<string, object>();
+                    int count = 0;
                     foreach (TablePair pair in value.Table.Pairs)
                     {
-                        dictionary[pair.Key.ToPrintString()] = ToPlainValue(pair.Value);
+                        count++;
+                        if (count > 4096)
+                        {
+                            visited.Remove(value.Table);
+                            throw new ScriptRuntimeException(
+                                "A report value table may contain at most 4096 entries.");
+                        }
+                        dictionary[pair.Key.ToPrintString()] =
+                            ToPlainValue(pair.Value, depth + 1, visited);
                     }
+                    visited.Remove(value.Table);
                     return dictionary;
                 default:
                     return value.ToPrintString();
             }
         }
 
+        private static void SetPlain(Table table, string key, object value)
+        {
+            table.Set(
+                key,
+                value == null
+                    ? DynValue.Nil
+                    : DynValue.FromObject(table.OwnerScript, value));
+        }
+
+        private static bool IsFinite(double value)
+        {
+            return !double.IsNaN(value) && !double.IsInfinity(value);
+        }
+
         private sealed class CaptureState
         {
             public string Path;
             public bool Complete;
+            public bool Cancelled;
             public Exception Error;
         }
     }
