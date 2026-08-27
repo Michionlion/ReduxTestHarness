@@ -76,3 +76,17 @@ Campaign Load, Save/Load Dialog, and Quickload flows by calling
 `GameInstance.ResetUniverse` before every semantic fixture load. The dedicated
 `launchpad-reload.lua` regression test loads the same fixture twice in one game
 process.
+
+The regression passed in `15.198` seconds with all six assertions passing and
+no report errors:
+
+```powershell
+.\redux-test run .\tests\smoke\launchpad-reload.lua --launch
+```
+
+The original cross-invocation failure mode was also repeated after the fix. A
+launchpad test started KSP2 with `--keep-open`, then a second CLI invocation ran
+the same launchpad test against that retained process. Both passed, and the
+second run's collected logs contained no `Minmus` duplicate-registration,
+`ScienceRegionsDataProvider`, `AmbienceManager`, or `NullReferenceException`
+signatures. The retained game then accepted a clean bridge shutdown.
