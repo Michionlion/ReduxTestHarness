@@ -5,7 +5,7 @@ Validated locally on 2026-08-27 with:
 - KSP2 application version `0.2.3.0`;
 - Redux `0.2.8.5.103184-beta`, commit `ffc94930`;
 - Unity `6000.4.1f1` Windows player;
-- Redux Test Harness `0.1.0.0`;
+- Redux Test Harness `0.2.0.0`;
 - NVIDIA GeForce RTX 5070 Ti.
 
 The fixture-free runtime command passed:
@@ -22,10 +22,12 @@ Observed end-to-end behavior:
    `CliIntegration` was absent.
 4. The existing KSP2 MoonSharp environment executed the Lua test as a
    coroutine.
-5. One assertion passed and game state was recorded as `MainMenu`.
+5. Five assertions passed, including active-mod discovery and execution of the
+   harness's registered semantic extension.
 6. KSP2 wrote a 2560x1440 PNG screenshot.
-7. The harness copied `Ksp2.log`, `Player.log`, and the legacy
-   `BepInEx/LogOutput.log`.
+7. The harness copied bounded startup slices of `Ksp2.log`, `Player.log`, and
+   the legacy `BepInEx/LogOutput.log`; the complete artifact set was under
+   4.7 MiB.
 8. `report.json` and `summary.md` were finalized with status `passed` and no
    harness/test errors.
 9. The CLI printed the report and screenshot paths, returned exit code `0`,
@@ -55,17 +57,27 @@ captured before/after 2560x1440 screenshots. The run took `11.89` seconds after
 the test was accepted and returned exit code `0`.
 
 The static/mock suite also verifies PowerShell parsing, JSON parsing, C# player
-assembly compilation, loopback status/run behavior, and CLI exit codes `0`,
-`1`, and `2`:
+assembly compilation, loopback status/run behavior, CLI exit codes `0`, `1`,
+and `2`, and CLI recovery of an `infrastructure_failed` report after a bridge
+disconnect:
 
 ```powershell
 pwsh .\tests\run-tests.ps1
 ```
 
-The captured player logs contain pre-existing `ReduxBetterAA` Harmony and
-missing-addressable errors from that separately installed development mod.
-They did not originate in `ReduxTestHarness`; automatic log collection made
-them visible as intended.
+The retained-process `api-guards.lua` regression covers six checks and
+confirmed that NaN waits, unsafe screenshot scales, cyclic report tables, and
+negative tolerances, throttle overflow, and invalid camera distances fail
+locally without corrupting the runner. The deliberate
+`log-policy-fail.lua` test wrote one sentinel through `Test.report.log`; the CLI
+returned exit code `1` and the report contained one `forbidden_log_match`.
+That run's complete log slice was 83 bytes, confirming that retained tests no
+longer copy historical player logs.
+
+The session-isolation pair changed supersampling from `1.0` to `2.0` and
+disabled clouds in one run. The immediately following retained-process probe
+observed the original supersampling value `1.0` and clouds enabled. Both tests
+passed with no cleanup warnings or errors.
 
 Cold-process save load, vessel activation, deterministic flight camera,
 throttle/SAS/stage control, state waiting, and capture are runtime-validated by
@@ -90,3 +102,8 @@ the same launchpad test against that retained process. Both passed, and the
 second run's collected logs contained no `Minmus` duplicate-registration,
 `ScienceRegionsDataProvider`, `AmbienceManager`, or `NullReferenceException`
 signatures. The retained game then accepted a clean bridge shutdown.
+
+The 0.2 review repeated `launchpad-reload.lua` with `--FailOnLogErrors`. All six
+assertions passed in `8.539` seconds, the CLI returned `0`, and the run-local
+logs contained no general exception signature, duplicate `Minmus` registration,
+`ScienceRegionsDataProvider`, or `AmbienceManager` failure.

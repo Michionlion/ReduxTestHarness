@@ -6,7 +6,8 @@ Developer-only automated in-game testing for KSP2 Redux. The prototype provides:
 - a localhost-only JSON-lines bridge with five commands;
 - Lua execution in a fork of KSP2's existing MoonSharp environment;
 - a semantic `Test` API for game state, flight, waits, camera, selected rendering settings, screenshots, assertions, and reporting;
-- per-run `report.json`, `summary.md`, screenshots, copied logs, and the executed Lua script.
+- active-mod discovery and an extension registry for mod-owned semantic test APIs;
+- isolated per-run `report.json`, `summary.md`, screenshots, attachments, bounded logs, and the executed Lua script.
 
 The external protocol does not expose KSP2 objects or duplicate semantic operations. It only starts/cancels Lua tests and reports lifecycle state.
 
@@ -21,12 +22,19 @@ pwsh .\scripts\install-mod.ps1
 
 `install-mod.ps1` copies the mod to `KSP2\mods\ReduxTestHarness` and creates `test-mode.enabled`. The bridge will not start unless that marker exists or KSP2 is launched with `REDUX_TEST_ENABLE=1`.
 
-Override the default game location with `-GameRoot` or `KSP2_ROOT`:
+Override the default game location with `-GameRoot` or `KSP2_ROOT`. If Unity
+6000.4.1f1 is not in its standard location, pass `-UnityRoot` or set
+`UNITY_6000_4_1F1_ROOT`:
 
 ```powershell
 $env:KSP2_ROOT = 'D:\SteamLibrary\steamapps\common\Kerbal Space Program 2'
+$env:UNITY_6000_4_1F1_ROOT = 'D:\Unity\6000.4.1f1'
 pwsh .\scripts\install-mod.ps1
 ```
+
+KSP2 must be closed before installation because Windows cannot replace a
+loaded mod DLL. The install script detects this and reports the player process
+IDs rather than failing partway through a copy.
 
 ## Run
 
@@ -56,7 +64,8 @@ agreements. Pass `--KeepStartupWarning` to retain the photosensitivity page.
 A fresh launch also waits for the unobstructed main menu to remain ready for
 two seconds before Lua begins. Override that grace period with
 `--StartupSettleSeconds`. `--results`, `--fixtures`, `--GameRoot`, and `--Port`
-override their corresponding defaults.
+override their corresponding defaults. `--FailOnLogErrors` fails the test if a
+new exception signature is written while that run is active.
 
 Exit codes are:
 
@@ -85,15 +94,18 @@ Test.flight.start / active_vessel / find_vessel / set_throttle / stage / set_sas
 Test.wait.frames / seconds / until_ (`Test.wait["until"]` is also supported)
 Test.camera.mode / target_vessel / set / orbit
 Test.render.set / get / wait_stable
+Test.mod.is_loaded / info / list / extension
 Test.capture.screenshot
 Test.assert.true_ / false_ / equal / not_equal / near / greater / less
-Test.report.note / metric / value / attach
+Test.report.note / log / metric / value / attach / fail_on_log / fail_on_log_errors
 ```
 
 See [tests/smoke/orbit-render.lua](tests/smoke/orbit-render.lua) for a complete
 vertical-slice test, [tests/smoke/launchpad-reload.lua](tests/smoke/launchpad-reload.lua)
 for the same-process save-reload regression, [docs/architecture.md](docs/architecture.md)
-for integration details and current seams, and [docs/validation.md](docs/validation.md)
+for integration details and current seams, [docs/extensions.md](docs/extensions.md)
+for mod-owned semantic API registration, [docs/review.md](docs/review.md) for the
+full harness audit, and [docs/validation.md](docs/validation.md)
 for the completed player smoke evidence.
 
 The shipped Redux player currently lacks its documented `CliIntegration`
