@@ -1,0 +1,6 @@
+artifacts/
+build/
+.test-results/
+fixtures/local/
+*.user
+*.suo

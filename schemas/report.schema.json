@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ksp2redux.dev/schemas/redux-test-report-v1.json",
+  "title": "Redux in-game test report",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "runId",
+    "name",
+    "script",
+    "status",
+    "startedUtc",
+    "durationSeconds",
+    "environment",
+    "assertions",
+    "screenshots",
+    "errors"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "runId": { "type": "string", "minLength": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "script": { "type": "string" },
+    "status": {
+      "enum": ["running", "passed", "failed", "cancelled", "infrastructure_failed"]
+    },
+    "startedUtc": { "type": "string", "format": "date-time" },
+    "endedUtc": { "type": ["string", "null"], "format": "date-time" },
+    "durationSeconds": { "type": "number", "minimum": 0 },
+    "environment": {
+      "type": "object",
+      "required": ["kspVersion", "reduxVersion", "harnessVersion", "unityVersion"],
+      "properties": {
+        "kspVersion": { "type": ["string", "null"] },
+        "reduxVersion": { "type": ["string", "null"] },
+        "reduxCommit": { "type": ["string", "null"] },
+        "harnessVersion": { "type": ["string", "null"] },
+        "unityVersion": { "type": ["string", "null"] },
+        "platform": { "type": ["string", "null"] },
+        "graphicsDevice": { "type": ["string", "null"] }
+      }
+    },
+    "fixture": { "type": ["string", "null"] },
+    "assertions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["status", "expression"],
+        "properties": {
+          "status": { "enum": ["passed", "failed"] },
+          "expression": { "type": "string" },
+          "message": { "type": ["string", "null"] },
+          "actual": {},
+          "expected": {}
+        }
+      }
+    },
+    "notes": { "type": "array", "items": { "type": "string" } },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": { "type": "number" }
+    },
+    "values": { "type": "object" },
+    "screenshots": { "type": "array", "items": { "type": "string" } },
+    "attachments": { "type": "array", "items": { "type": "string" } },
+    "logs": { "type": "array", "items": { "type": "string" } },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "message"],
+        "properties": {
+          "kind": { "type": ["string", "null"] },
+          "message": { "type": ["string", "null"] },
+          "stackTrace": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "process": {
+      "type": "object",
+      "required": ["processId", "crashed"],
+      "properties": {
+        "processId": { "type": "integer" },
+        "exitCode": { "type": ["integer", "null"] },
+        "crashed": { "type": "boolean" }
+      }
+    }
+  }
+}
+
