@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string] $GameRoot = $env:KSP2_ROOT,
+    [string] $UnityRoot = $env:UNITY_6000_4_1F1_ROOT,
     [switch] $AsJson
 )
 
@@ -8,14 +9,25 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 if (-not $GameRoot) {
-    $GameRoot = 'G:\SteamLibrary\steamapps\common\Kerbal Space Program 2'
+    $GameRoot = @(
+        'G:\SteamLibrary\steamapps\common\Kerbal Space Program 2',
+        'C:\Program Files (x86)\Steam\steamapps\common\Kerbal Space Program 2'
+    ) | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'KSP2_x64.exe') } |
+        Select-Object -First 1
+}
+if (-not $GameRoot) {
+    throw 'KSP2 was not found. Pass -GameRoot or set KSP2_ROOT.'
 }
 $GameRoot = [IO.Path]::GetFullPath($GameRoot)
 $managed = Join-Path $GameRoot 'KSP2_x64_Data\Managed'
 $assembly = Join-Path $managed 'Assembly-CSharp.dll'
 $spaceWarpUi = Join-Path $managed 'SpaceWarp2.UI.dll'
-$unityMono = 'C:\Program Files\Unity\Hub\Editor\6000.4.1f1\Editor\Data\MonoBleedingEdge\bin\mono.exe'
-$ikdasm = 'C:\Program Files\Unity\Hub\Editor\6000.4.1f1\Editor\Data\MonoBleedingEdge\lib\mono\4.5\ikdasm.exe'
+if (-not $UnityRoot) {
+    $UnityRoot = 'C:\Program Files\Unity\Hub\Editor\6000.4.1f1'
+}
+$UnityRoot = [IO.Path]::GetFullPath($UnityRoot)
+$unityMono = Join-Path $UnityRoot 'Editor\Data\MonoBleedingEdge\bin\mono.exe'
+$ikdasm = Join-Path $UnityRoot 'Editor\Data\MonoBleedingEdge\lib\mono\4.5\ikdasm.exe'
 
 foreach ($required in @($assembly, $spaceWarpUi, $unityMono, $ikdasm)) {
     if (-not (Test-Path -LiteralPath $required)) {

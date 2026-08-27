@@ -10,6 +10,7 @@ param(
     [switch] $Launch,
     [switch] $KeepOpen,
     [switch] $KeepStartupWarning,
+    [switch] $FailOnLogErrors,
     [ValidateRange(1, 86400)]
     [int] $Timeout = 180,
     [ValidateRange(0, 60)]
@@ -29,6 +30,16 @@ $ErrorActionPreference = 'Stop'
 function Write-CliError {
     param([Parameter(Mandatory = $true)] [string] $Message)
     [Console]::Error.WriteLine($Message)
+}
+
+function Get-OptionalPropertyValue {
+    param(
+        [Parameter(Mandatory = $true)] $Object,
+        [Parameter(Mandatory = $true)] [string] $Name
+    )
+
+    $property = $Object.PSObject.Properties[$Name]
+    return $(if ($null -eq $property) { $null } else { $property.Value })
 }
 
 function Resolve-AbsolutePath {
@@ -113,10 +124,20 @@ function Invoke-BridgeRequest {
 function Test-BridgeReady {
     try {
         $response = Invoke-BridgeRequest -Request @{ command = 'ping' } -ConnectTimeoutMilliseconds 750
-        return $response.ok -eq $true -and $response.ready -eq $true
+        return $response.ok -eq $true -and $response.ready -eq $true -and
+            [int]$response.protocolVersion -eq 1
     }
     catch {
         return $false
+    }
+}
+
+function Assert-CompatibleBridgeStatus {
+    param([Parameter(Mandatory = $true)] $Status)
+
+    if ($Status.ok -ne $true) { throw [string]$Status.error }
+    if ([int]$Status.protocolVersion -ne 1) {
+        throw "Unsupported Redux test protocol version '$($Status.protocolVersion)'; CLI requires version 1."
     }
 }
 
@@ -155,8 +176,11 @@ function Wait-StartupMenuReady {
         try {
             $status = Invoke-BridgeRequest -Request @{ command = 'ping' } -ConnectTimeoutMilliseconds 750
             $lastState = [string] $status.gameState
+            $startupWarningVisible = Get-OptionalPropertyValue `
+                -Object $status `
+                -Name 'startupWarningVisible'
             if ($status.ok -eq $true -and $lastState -eq 'MainMenu' -and
-                $status.startupWarningVisible -ne $true) {
+                $startupWarningVisible -ne $true) {
                 if ($null -eq $readyAtSeconds) {
                     $readyAtSeconds = $Clock.Elapsed.TotalSeconds
                 }
@@ -193,17 +217,131 @@ function Write-RunResult {
     }
 }
 
+function Complete-InfrastructureReport {
+    param(
+        [string] $ArtifactDirectory,
+        [string] $RunId,
+        [string] $ScriptPath,
+        [Diagnostics.Stopwatch] $Clock,
+        [string] $ErrorMessage,
+        [Diagnostics.Process] $Process
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ArtifactDirectory)) { return $null }
+    try {
+        New-Item -ItemType Directory -Force -Path $ArtifactDirectory | Out-Null
+        $reportPath = Join-Path $ArtifactDirectory 'report.json'
+        if (Test-Path -LiteralPath $reportPath) {
+            $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json -AsHashtable
+        }
+        else {
+            $report = [ordered]@{
+                schemaVersion = 1
+                runId = $RunId
+                name = [IO.Path]::GetFileNameWithoutExtension($ScriptPath)
+                script = $ScriptPath
+                status = 'running'
+                startedUtc = [DateTime]::UtcNow.AddSeconds(-$Clock.Elapsed.TotalSeconds).ToString('o')
+                endedUtc = $null
+                durationSeconds = 0
+                environment = [ordered]@{
+                    kspVersion = $null
+                    reduxVersion = $null
+                    reduxCommit = $null
+                    harnessVersion = $null
+                    unityVersion = $null
+                    platform = $null
+                    graphicsDevice = $null
+                    mods = @()
+                }
+                fixture = $null
+                assertions = @()
+                notes = @()
+                metrics = [ordered]@{}
+                values = [ordered]@{}
+                screenshots = @()
+                attachments = @()
+                logs = @()
+                errors = @()
+                warnings = @()
+                process = [ordered]@{ processId = 0; exitCode = $null; crashed = $false }
+            }
+        }
+
+        $report.status = 'infrastructure_failed'
+        $report.endedUtc = [DateTime]::UtcNow.ToString('o')
+        $report.durationSeconds = [Math]::Round($Clock.Elapsed.TotalSeconds, 3)
+        $report.errors = @($report.errors) + @([ordered]@{
+            kind = 'cli_infrastructure'
+            message = $ErrorMessage
+            stackTrace = $null
+        })
+        if (-not $report.Contains('process') -or $null -eq $report.process) {
+            $report.process = [ordered]@{ processId = 0; exitCode = $null; crashed = $false }
+        }
+        if ($Process) {
+            $report.process.processId = $Process.Id
+            if ($Process.HasExited) {
+                $report.process.exitCode = $Process.ExitCode
+                $report.process.crashed = $true
+            }
+        }
+
+        $temporary = $reportPath + '.cli.tmp'
+        [IO.File]::WriteAllText(
+            $temporary,
+            ($report | ConvertTo-Json -Depth 30),
+            [Text.UTF8Encoding]::new($false))
+        [IO.File]::Move($temporary, $reportPath, $true)
+
+        $assertions = @($report.assertions)
+        $passedAssertions = @($assertions | Where-Object status -eq 'passed').Count
+        $summary = @(
+            "INFRASTRUCTURE FAIL — $($report.name)"
+            ''
+            "Duration: $($report.durationSeconds) s"
+            "Fixture: $(if ($report.fixture) { $report.fixture } else { 'none' })"
+            ''
+            "Assertions: $passedAssertions/$($assertions.Count) passed"
+            "Screenshots: $(@($report.screenshots).Count)"
+            "Errors: $(@($report.errors).Count)"
+            "Warnings: $(@($report.warnings).Count)"
+        ) -join [Environment]::NewLine
+        $summaryPath = Join-Path $ArtifactDirectory 'summary.md'
+        $summaryTemporary = $summaryPath + '.cli.tmp'
+        [IO.File]::WriteAllText(
+            $summaryTemporary,
+            $summary + [Environment]::NewLine,
+            [Text.UTF8Encoding]::new($false))
+        [IO.File]::Move($summaryTemporary, $summaryPath, $true)
+        return $reportPath
+    }
+    catch {
+        Write-Warning "Could not finalize the infrastructure report: $($_.Exception.Message)"
+        return $null
+    }
+}
+
 if ($Command -eq 'status') {
     try {
         $status = Invoke-BridgeRequest -Request @{ command = 'ping' }
-        if (-not $status.ok) { throw $status.error }
-        Write-Host "Redux test bridge: ready"
+        Assert-CompatibleBridgeStatus -Status $status
+        $readyLabel = if ($status.ready) { 'ready' } else { 'not ready' }
+        Write-Host "Redux test bridge: $readyLabel"
+        $harnessVersion = Get-OptionalPropertyValue -Object $status -Name 'harnessVersion'
+        if ($harnessVersion) { Write-Host "Harness version: $harnessVersion" }
         Write-Host "Game state: $($status.gameState)"
         Write-Host "Test state: $($status.testStatus)"
-        if ($null -ne $status.reduxCliIntegration) {
-            $nativeState = if ($status.reduxCliIntegration.available) { 'available' } else { 'missing from player build' }
+        $activeModCount = Get-OptionalPropertyValue -Object $status -Name 'activeModCount'
+        if ($null -ne $activeModCount) { Write-Host "Active mods: $activeModCount" }
+        $reduxCliIntegration = Get-OptionalPropertyValue `
+            -Object $status `
+            -Name 'reduxCliIntegration'
+        if ($null -ne $reduxCliIntegration) {
+            $nativeState = if ($reduxCliIntegration.available) { 'available' } else { 'missing from player build' }
             Write-Host "Redux CliIntegration: $nativeState"
         }
+        if (-not $status.ready) { exit 2 }
         exit 0
     }
     catch {
@@ -220,6 +358,9 @@ if (-not $Script) {
 $launchedProcess = $null
 $launchedByThisCommand = $false
 $clock = [Diagnostics.Stopwatch]::StartNew()
+$artifactDirectory = $null
+$runId = $null
+$scriptPath = $null
 
 try {
     $scriptPath = Resolve-AbsolutePath -Path $Script
@@ -244,6 +385,11 @@ try {
         }
 
         $resolvedGameRoot = Resolve-KspRoot -RequestedRoot $GameRoot
+        $runningKsp = @(Get-Process -Name 'KSP2_x64' -ErrorAction SilentlyContinue)
+        if ($runningKsp.Count -gt 0) {
+            $ids = ($runningKsp | ForEach-Object Id) -join ', '
+            throw "KSP2 is already running (process $ids), but its Redux test bridge is unavailable. Close it, install/enable the harness, or connect to its configured port; refusing to launch a second player."
+        }
         $marker = Join-Path $resolvedGameRoot 'mods\ReduxTestHarness\test-mode.enabled'
         if (-not (Test-Path -LiteralPath $marker)) {
             throw "ReduxTestHarness is not installed/enabled. Run scripts\install-mod.ps1 first (missing $marker)."
@@ -252,6 +398,7 @@ try {
             REDUX_TEST_ENABLE = '1'
             REDUX_TEST_PORT = $Port.ToString([Globalization.CultureInfo]::InvariantCulture)
             REDUX_TEST_DISMISS_PHOTOSENSITIVITY = $(if ($KeepStartupWarning) { '0' } else { '1' })
+            REDUX_TEST_INCLUDE_STARTUP_LOGS = '1'
         }
         $launchedProcess = Start-Process `
             -FilePath (Join-Path $resolvedGameRoot 'KSP2_x64.exe') `
@@ -267,6 +414,10 @@ try {
             -Process $launchedProcess
     }
 
+    $remainingTimeout = [Math]::Floor($Timeout - $clock.Elapsed.TotalSeconds)
+    if ($remainingTimeout -lt 1) {
+        throw "No test time remained after KSP2 startup within the overall timeout of $Timeout seconds."
+    }
     $runId = [Guid]::NewGuid().ToString('N')
     $response = Invoke-BridgeRequest -Request @{
         command = 'run_script'
@@ -275,12 +426,14 @@ try {
         scriptPath = $scriptPath
         resultsRoot = $resultsRoot
         fixturesRoot = $fixturesRoot
-        timeoutSeconds = $Timeout
+        timeoutSeconds = [int]$remainingTimeout
+        failOnLogErrors = [bool]$FailOnLogErrors
     } -ConnectTimeoutMilliseconds 10000
 
     if (-not $response.ok) {
         throw $response.error
     }
+    $artifactDirectory = [string]$response.artifactDirectory
 
     while ($clock.Elapsed.TotalSeconds -lt $Timeout) {
         if ($launchedProcess -and $launchedProcess.HasExited) {
@@ -307,7 +460,17 @@ try {
     throw "Test exceeded the overall timeout of $Timeout seconds."
 }
 catch {
+    $infrastructureReport = Complete-InfrastructureReport `
+        -ArtifactDirectory $artifactDirectory `
+        -RunId $runId `
+        -ScriptPath $scriptPath `
+        -Clock $clock `
+        -ErrorMessage $_.Exception.Message `
+        -Process $launchedProcess
     Write-CliError $_.Exception.Message
+    if ($infrastructureReport) {
+        Write-CliError "Infrastructure report: $infrastructureReport"
+    }
     exit 2
 }
 finally {

@@ -2,7 +2,10 @@
 param(
     [Parameter(Mandatory = $true)]
     [ValidateRange(1, 65535)]
-    [int] $Port
+    [int] $Port,
+    [switch] $DisconnectAfterAccept,
+    [switch] $NotReady,
+    [string] $ArtifactDirectory = 'mock-artifacts'
 )
 
 Set-StrictMode -Version Latest
@@ -29,10 +32,13 @@ try {
                     'ping' {
                         [ordered]@{
                             ok = $true
-                            ready = $true
+                            ready = -not $NotReady
                             gameState = 'MainMenu'
                             testStatus = if ($runId) { 'passed' } else { 'idle' }
                             protocolVersion = 1
+                            harnessVersion = '0.2.0.0'
+                            activeModCount = 1
+                            startupWarningVisible = $false
                             reduxCliIntegration = [ordered]@{ available = $false }
                         }
                     }
@@ -43,11 +49,12 @@ try {
                         } else {
                             'passed'
                         }
+                        if ($DisconnectAfterAccept) { $running = $false }
                         [ordered]@{
                             ok = $true
                             accepted = $true
                             runId = $runId
-                            artifactDirectory = 'mock-artifacts'
+                            artifactDirectory = $ArtifactDirectory
                         }
                     }
                     'get_status' {

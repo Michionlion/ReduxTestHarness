@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string] $GameRoot = $env:KSP2_ROOT,
+    [string] $UnityRoot = $env:UNITY_6000_4_1F1_ROOT,
     [string] $Configuration = 'Debug'
 )
 
@@ -9,7 +10,14 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if (-not $GameRoot) {
-    $GameRoot = 'G:\SteamLibrary\steamapps\common\Kerbal Space Program 2'
+    $GameRoot = @(
+        'G:\SteamLibrary\steamapps\common\Kerbal Space Program 2',
+        'C:\Program Files (x86)\Steam\steamapps\common\Kerbal Space Program 2'
+    ) | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'KSP2_x64.exe') } |
+        Select-Object -First 1
+}
+if (-not $GameRoot) {
+    throw 'KSP2 was not found. Pass -GameRoot or set KSP2_ROOT.'
 }
 $GameRoot = [IO.Path]::GetFullPath($GameRoot)
 $managed = Join-Path $GameRoot 'KSP2_x64_Data\Managed'
@@ -17,9 +25,12 @@ if (-not (Test-Path -LiteralPath (Join-Path $managed 'Assembly-CSharp.dll'))) {
     throw "KSP2 managed assemblies were not found under $managed"
 }
 
-$unityRoot = 'C:\Program Files\Unity\Hub\Editor\6000.4.1f1'
-$compiler = Join-Path $unityRoot 'Editor\Data\MonoBleedingEdge\lib\mono\4.5\csc.exe'
-$mono = Join-Path $unityRoot 'Editor\Data\MonoBleedingEdge\bin\mono.exe'
+if (-not $UnityRoot) {
+    $UnityRoot = 'C:\Program Files\Unity\Hub\Editor\6000.4.1f1'
+}
+$UnityRoot = [IO.Path]::GetFullPath($UnityRoot)
+$compiler = Join-Path $UnityRoot 'Editor\Data\MonoBleedingEdge\lib\mono\4.5\csc.exe'
+$mono = Join-Path $UnityRoot 'Editor\Data\MonoBleedingEdge\bin\mono.exe'
 if (-not (Test-Path -LiteralPath $compiler)) {
     throw "Unity C# compiler was not found: $compiler"
 }

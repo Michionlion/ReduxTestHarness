@@ -130,6 +130,68 @@ finally {
     $mock.Dispose()
 }
 
+Write-Host 'Exercising CLI infrastructure-report recovery...'
+$crashPortProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+$crashPortProbe.Start()
+$crashPort = ([Net.IPEndPoint]$crashPortProbe.LocalEndpoint).Port
+$crashPortProbe.Stop()
+$crashArtifacts = Join-Path $repoRoot '.test-results\mock-infrastructure'
+$crashMock = Start-Process `
+    -FilePath $pwsh `
+    -ArgumentList @(
+        '-NoProfile',
+        '-File', (Join-Path $PSScriptRoot 'mock-bridge.ps1'),
+        '-Port', $crashPort,
+        '-DisconnectAfterAccept',
+        '-ArtifactDirectory', $crashArtifacts) `
+    -WindowStyle Hidden `
+    -PassThru
+try {
+    $crashReady = $false
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        try {
+            $ping = Send-BridgeRequest -Port $crashPort -Request @{ command = 'ping' }
+            if ($ping.ok -and $ping.ready) {
+                $crashReady = $true
+                break
+            }
+        }
+        catch {
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    Assert-True $crashReady 'Disconnecting mock bridge did not become ready.'
+
+    $crashOutput = & $pwsh -NoProfile -File (Join-Path $repoRoot 'redux-test.ps1') `
+        run (Join-Path $repoRoot 'tests\smoke\runtime-ready.lua') `
+        -Port $crashPort `
+        -Timeout 10 2>&1
+    $crashExit = $LASTEXITCODE
+    Assert-True ($crashExit -eq 2) `
+        "Disconnected bridge run exited with $crashExit instead of 2: $crashOutput"
+    $infrastructureReportPath = Join-Path $crashArtifacts 'report.json'
+    Assert-True (Test-Path -LiteralPath $infrastructureReportPath) `
+        'CLI did not create an infrastructure report after the bridge disconnected.'
+    $infrastructureReport = Get-Content -LiteralPath $infrastructureReportPath -Raw |
+        ConvertFrom-Json -AsHashtable
+    Assert-True ($infrastructureReport.status -eq 'infrastructure_failed') `
+        "Recovered report status was '$($infrastructureReport.status)'."
+    Assert-True (@($infrastructureReport.errors).Count -gt 0) `
+        'Recovered infrastructure report did not contain an error.'
+    $infrastructureSummaryPath = Join-Path $crashArtifacts 'summary.md'
+    Assert-True (Test-Path -LiteralPath $infrastructureSummaryPath) `
+        'CLI did not finalize summary.md after the bridge disconnected.'
+    $infrastructureSummary = Get-Content -LiteralPath $infrastructureSummaryPath -Raw
+    Assert-True ($infrastructureSummary -match '^INFRASTRUCTURE FAIL') `
+        'Recovered infrastructure summary did not expose the failure status.'
+}
+finally {
+    if (-not $crashMock.HasExited) {
+        Stop-Process -Id $crashMock.Id -Force
+    }
+    $crashMock.Dispose()
+}
+
 $unavailableProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
 $unavailableProbe.Start()
 $unavailablePort = ([Net.IPEndPoint]$unavailableProbe.LocalEndpoint).Port
