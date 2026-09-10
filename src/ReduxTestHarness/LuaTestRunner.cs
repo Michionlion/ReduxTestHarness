@@ -418,12 +418,43 @@ namespace ReduxTestHarness
                     OptionalFieldNumber(options, "fov", 60.0));
                 return DynValue.Nil;
             });
+            SetCallback(api, "direct_orbit", (context, args) =>
+            {
+                Table options = RequiredTable(args, 0, "Test.camera.direct_orbit");
+                _game.SetOrbitCamera(
+                    RequiredFieldNumber(
+                        options,
+                        "distance",
+                        "Test.camera.direct_orbit"),
+                    RequiredFieldNumber(
+                        options,
+                        "yaw",
+                        "Test.camera.direct_orbit"),
+                    RequiredFieldNumber(
+                        options,
+                        "pitch",
+                        "Test.camera.direct_orbit"),
+                    OptionalFieldNumber(options, "fov", 60.0),
+                    false);
+                return DynValue.Nil;
+            });
             SetCallback(api, "set", (context, args) =>
             {
                 Table options = RequiredTable(args, 0, "Test.camera.set");
                 Vector3 position = VectorField(options, "position");
                 Vector3 rotation = VectorField(options, "rotation");
                 _game.SetCamera(position, rotation, (float)OptionalFieldNumber(options, "fov", 60.0));
+                return DynValue.Nil;
+            });
+            SetCallback(api, "absolute", (context, args) =>
+            {
+                Table options = RequiredTable(args, 0, "Test.camera.absolute");
+                Vector3 position = VectorField(options, "position");
+                Quaternion rotation = QuaternionField(options, "rotation");
+                _game.SetAbsoluteCamera(
+                    position,
+                    rotation,
+                    (float)OptionalFieldNumber(options, "fov", 60.0));
                 return DynValue.Nil;
             });
             return api;
@@ -1164,6 +1195,34 @@ namespace ReduxTestHarness
                 (float)x.Number,
                 (float)y.Number,
                 (float)z.Number);
+        }
+
+        private static Quaternion QuaternionField(Table table, string field)
+        {
+            DynValue value = table.Get(field);
+            if (value.Type != DataType.Table)
+            {
+                throw new ScriptRuntimeException(
+                    "Camera field '" + field + "' must be a four-number array.");
+            }
+            DynValue x = value.Table.Get(1);
+            DynValue y = value.Table.Get(2);
+            DynValue z = value.Table.Get(3);
+            DynValue w = value.Table.Get(4);
+            if (x.Type != DataType.Number || y.Type != DataType.Number ||
+                z.Type != DataType.Number || w.Type != DataType.Number ||
+                !IsFinite(x.Number) || !IsFinite(y.Number) ||
+                !IsFinite(z.Number) || !IsFinite(w.Number))
+            {
+                throw new ScriptRuntimeException(
+                    "Camera field '" + field +
+                    "' must be a finite four-number array.");
+            }
+            return new Quaternion(
+                (float)x.Number,
+                (float)y.Number,
+                (float)z.Number,
+                (float)w.Number);
         }
 
         private static bool DynEquals(DynValue left, DynValue right)

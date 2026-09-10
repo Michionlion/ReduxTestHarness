@@ -1,0 +1,20 @@
+Test.name("Redux Better AA flight layer zero snapshot")
+
+Test.assert.true_(Test.mod.is_loaded("ReduxBetterAA"), "ReduxBetterAA is required")
+local better_aa = Test.mod.extension("ReduxBetterAA")
+Test.assert.not_equal(better_aa, nil, "ReduxBetterAA adapter is required")
+
+better_aa.set_backend("Off")
+Test.game.load_save("local/launchpad-cloudy-fly-safe-15")
+Test.game.wait_for_state("Flight", 45)
+Test.flight.start("Fly Safe-15")
+Test.camera.mode("Flight")
+Test.camera.target_vessel()
+Test.wait.frames(60)
+better_aa.select_camera("FlightCameraPhysics_Main")
+better_aa.override_camera_state("noCulling")
+better_aa.set_camera_culling_mask(1)
+Test.report.value("layerZeroRenderers", better_aa.scaled_planet_snapshot())
+better_aa.restore_camera_state()
+Test.report.note(
+    "Recorded active Renderer components visible to FlightCameraPhysics_Main when its culling mask contains only layer 0.")

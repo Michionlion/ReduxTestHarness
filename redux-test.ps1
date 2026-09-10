@@ -13,6 +13,8 @@ param(
     [switch] $FailOnLogErrors,
     [ValidateRange(1, 86400)]
     [int] $Timeout = 180,
+    [ValidateRange(5, 600)]
+    [int] $ResponseTimeoutSeconds = 5,
     [ValidateRange(0, 60)]
     [double] $StartupSettleSeconds = 2,
     [string] $Results,
@@ -97,7 +99,7 @@ function Invoke-BridgeRequest {
         }
 
         $stream = $client.GetStream()
-        $stream.ReadTimeout = [Math]::Max(5000, $ConnectTimeoutMilliseconds)
+        $stream.ReadTimeout = [Math]::Max($ResponseTimeoutSeconds * 1000, $ConnectTimeoutMilliseconds)
         $stream.WriteTimeout = [Math]::Max(5000, $ConnectTimeoutMilliseconds)
         $utf8 = [Text.UTF8Encoding]::new($false)
         $writer = [IO.StreamWriter]::new($stream, $utf8, 4096, $true)

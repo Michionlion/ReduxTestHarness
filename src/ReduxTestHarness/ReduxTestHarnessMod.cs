@@ -22,6 +22,7 @@ namespace ReduxTestHarness
         private float _startupWarningProbeDeadline;
         private bool _includeStartupLogs;
         private IDisposable _testApiRegistration;
+        private IDisposable _betterAaTestApiRegistration;
 
         public override void OnInitialized()
         {
@@ -54,6 +55,9 @@ namespace ReduxTestHarness
             _testApiRegistration = TestApiRegistry.Register(
                 "ReduxTestHarness",
                 ConfigureHarnessTestApi);
+            _betterAaTestApiRegistration = TestApiRegistry.Register(
+                "ReduxBetterAA",
+                ReduxBetterAaTestApi.Configure);
 
             int port = DefaultPort;
             string configuredPort = Environment.GetEnvironmentVariable("REDUX_TEST_PORT");
@@ -337,6 +341,12 @@ namespace ReduxTestHarness
             {
                 _testApiRegistration.Dispose();
                 _testApiRegistration = null;
+            }
+            if (_betterAaTestApiRegistration != null)
+            {
+                ReduxBetterAaTestApi.RestoreAll();
+                _betterAaTestApiRegistration.Dispose();
+                _betterAaTestApiRegistration = null;
             }
             if (_server != null)
             {

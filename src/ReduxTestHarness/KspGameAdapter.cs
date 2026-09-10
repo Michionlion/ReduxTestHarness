@@ -16,6 +16,11 @@ namespace ReduxTestHarness
 {
     internal sealed class KspGameAdapter
     {
+        private static readonly MethodInfo UpdatePrimaryCameraViewTransformsMethod =
+            typeof(UniverseCameraManager).GetMethod(
+                "UpdatePrimaryCameraViewTransforms",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+
         private readonly Dictionary<string, object> _renderValues =
             new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, object> _renderRestoreValues =
@@ -26,6 +31,9 @@ namespace ReduxTestHarness
         private Vector3 _originalCameraPosition;
         private Quaternion _originalCameraRotation;
         private float _originalCameraFov;
+        private ICameraRigSolution _overriddenRigSolution;
+        private GimbalState _originalRigGimbalState;
+        private double _originalRigFov;
         private bool _testSessionActive;
         private bool _restorePauseState;
         private bool _initialPauseState;
@@ -99,6 +107,16 @@ namespace ReduxTestHarness
         {
             var warnings = new List<string>();
             ClearCameraOverride();
+            try
+            {
+                ReduxBetterAaTestApi.RestoreAll();
+            }
+            catch (Exception error)
+            {
+                warnings.Add(
+                    "Could not restore Redux Better AA diagnostics: " +
+                    error.Message);
+            }
             if (!_testSessionActive)
             {
                 return warnings;
@@ -355,7 +373,12 @@ namespace ReduxTestHarness
             _cameraTarget = RequireActiveVessel();
         }
 
-        public void SetOrbitCamera(double distance, double yaw, double pitch, double fov)
+        public void SetOrbitCamera(
+            double distance,
+            double yaw,
+            double pitch,
+            double fov,
+            bool useCameraRig = true)
         {
             RequireFinite(distance, "camera distance");
             RequireFinite(yaw, "camera yaw");
@@ -377,7 +400,11 @@ namespace ReduxTestHarness
                 TargetActiveVessel();
             }
             _cameraRequest = CameraRequest.Orbit(
-                floatDistance, floatYaw, floatPitch, (float)fov);
+                floatDistance,
+                floatYaw,
+                floatPitch,
+                (float)fov,
+                useCameraRig);
         }
 
         public void SetCamera(Vector3 position, Vector3 rotation, float fov)
@@ -397,8 +424,30 @@ namespace ReduxTestHarness
             _cameraRequest = CameraRequest.Explicit(position, rotation, fov);
         }
 
+        public void SetAbsoluteCamera(
+            Vector3 position,
+            Quaternion rotation,
+            float fov)
+        {
+            RequireFinite(position.x, "camera position.x");
+            RequireFinite(position.y, "camera position.y");
+            RequireFinite(position.z, "camera position.z");
+            RequireFinite(rotation.x, "camera rotation.x");
+            RequireFinite(rotation.y, "camera rotation.y");
+            RequireFinite(rotation.z, "camera rotation.z");
+            RequireFinite(rotation.w, "camera rotation.w");
+            RequireFinite(fov, "camera fov");
+            ValidateFov(fov);
+            if (_cameraTarget == null)
+            {
+                TargetActiveVessel();
+            }
+            _cameraRequest = CameraRequest.Absolute(position, rotation, fov);
+        }
+
         public void ClearCameraOverride()
         {
+            RestoreOverriddenRig();
             RestoreOverriddenCamera();
             _cameraRequest = null;
             _cameraTarget = null;
@@ -419,6 +468,13 @@ namespace ReduxTestHarness
             VesselBehavior behavior = game.ViewController.GetBehaviorIfLoaded(_cameraTarget);
             Camera camera = game.GraphicsManager.GetCurrentUnityCamera();
             if (behavior == null || camera == null)
+            {
+                return;
+            }
+
+            if (_cameraRequest.IsOrbit &&
+                _cameraRequest.UseCameraRig &&
+                TryApplyOrbitRigOverride(game))
             {
                 return;
             }
@@ -448,10 +504,51 @@ namespace ReduxTestHarness
             }
             else
             {
-                camera.transform.position = target + _cameraRequest.Position;
-                camera.transform.rotation = Quaternion.Euler(_cameraRequest.Rotation);
+                camera.transform.position = _cameraRequest.IsAbsolute
+                    ? _cameraRequest.Position
+                    : target + _cameraRequest.Position;
+                camera.transform.rotation = _cameraRequest.IsAbsolute
+                    ? _cameraRequest.AbsoluteRotation
+                    : Quaternion.Euler(_cameraRequest.Rotation);
             }
             camera.fieldOfView = _cameraRequest.Fov;
+        }
+
+        private bool TryApplyOrbitRigOverride(GameInstance game)
+        {
+            UniverseCameraManager manager = game.CameraManager;
+            if (manager == null || UpdatePrimaryCameraViewTransformsMethod == null)
+            {
+                return false;
+            }
+
+            ICameraRig rig = manager.GetCamera(manager.PrimaryScreenCameraID);
+            ICameraRigSolution solution = rig == null ? null : rig.ActiveSolution;
+            if (solution == null || solution.CameraShot == null)
+            {
+                return false;
+            }
+
+            if (_overriddenRigSolution != solution)
+            {
+                RestoreOverriddenRig();
+                RestoreOverriddenCamera();
+                _overriddenRigSolution = solution;
+                _originalRigGimbalState = solution.GimbalState;
+                _originalRigFov = solution.CameraShot.FieldOfView;
+            }
+
+            GimbalState state = solution.GimbalState;
+            state.distance = _cameraRequest.Distance;
+            state.pitch = _cameraRequest.Rotation.x;
+            state.heading = _cameraRequest.Rotation.y;
+            state.roll = 0.0;
+            state.pan = Vector2.zero;
+            solution.SetGimbalState(state, false);
+            solution.SetCameraFieldOfView(_cameraRequest.Fov);
+            solution.RefreshShot();
+            UpdatePrimaryCameraViewTransformsMethod.Invoke(manager, null);
+            return true;
         }
 
         private void RestoreOverriddenCamera()
@@ -470,6 +567,26 @@ namespace ReduxTestHarness
                 }
             }
             _overriddenCamera = null;
+        }
+
+        private void RestoreOverriddenRig()
+        {
+            if (_overriddenRigSolution != null)
+            {
+                try
+                {
+                    _overriddenRigSolution.SetGimbalState(
+                        _originalRigGimbalState,
+                        false);
+                    _overriddenRigSolution.SetCameraFieldOfView(_originalRigFov);
+                    _overriddenRigSolution.RefreshShot();
+                }
+                catch
+                {
+                    // The rig may have been destroyed during a scene transition.
+                }
+            }
+            _overriddenRigSolution = null;
         }
 
         public void SetRenderSetting(string name, object value)
@@ -805,16 +922,25 @@ namespace ReduxTestHarness
         private sealed class CameraRequest
         {
             public bool IsOrbit;
+            public bool IsAbsolute;
+            public bool UseCameraRig;
             public float Distance;
             public Vector3 Position;
             public Vector3 Rotation;
+            public Quaternion AbsoluteRotation;
             public float Fov;
 
-            public static CameraRequest Orbit(float distance, float yaw, float pitch, float fov)
+            public static CameraRequest Orbit(
+                float distance,
+                float yaw,
+                float pitch,
+                float fov,
+                bool useCameraRig)
             {
                 return new CameraRequest
                 {
                     IsOrbit = true,
+                    UseCameraRig = useCameraRig,
                     Distance = distance,
                     Rotation = new Vector3(pitch, yaw, 0.0f),
                     Fov = fov
@@ -828,6 +954,21 @@ namespace ReduxTestHarness
                     IsOrbit = false,
                     Position = position,
                     Rotation = rotation,
+                    Fov = fov
+                };
+            }
+
+            public static CameraRequest Absolute(
+                Vector3 position,
+                Quaternion rotation,
+                float fov)
+            {
+                return new CameraRequest
+                {
+                    IsOrbit = false,
+                    IsAbsolute = true,
+                    Position = position,
+                    AbsoluteRotation = rotation,
                     Fov = fov
                 };
             }

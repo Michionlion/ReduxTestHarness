@@ -44,14 +44,17 @@ New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
 
 $references = @(
     'Assembly-CSharp.dll',
+    '0Harmony.dll',
     'MoonSharp.Interpreter.dll',
     'netstandard.dll',
     'Newtonsoft.Json.dll',
     'ReduxLib.dll',
     'SpaceWarp2.dll',
     'UnityEngine.dll',
+    'Unity.Entities.dll',
     'UnityEngine.CoreModule.dll',
     'UnityEngine.IMGUIModule.dll',
+    'UnityEngine.ImageConversionModule.dll',
     'UnityEngine.ScreenCaptureModule.dll',
     'UnityEngine.UIModule.dll'
 ) | ForEach-Object { Join-Path $managed $_ }
