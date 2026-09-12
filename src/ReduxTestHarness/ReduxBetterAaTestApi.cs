@@ -149,6 +149,26 @@ namespace ReduxTestHarness
 
         public static void Configure(Script script, Table table)
         {
+            table.Set("release_status", TestApiRegistry.Callback(
+                "ReduxBetterAA.release_status", (context, arguments) => ReleaseStatus(script)));
+            table.Set("set_map_enabled", TestApiRegistry.Callback(
+                "ReduxBetterAA.set_map_enabled", (context, arguments) =>
+                {
+                    Type type = RequireType(RequireBetterAaAssembly(),
+                        "ReduxBetterAA.Rendering.TemporalCoordinator");
+                    RequireMethod(type, "SetMapViewAaEnabled", InstanceAny).Invoke(
+                        RequireStaticField(type, "Current"), new object[] {
+                            RequiredBoolean(arguments, 0, "set_map_enabled") });
+                    return DynValue.Nil;
+                }));
+            table.Set("request_issue_report", TestApiRegistry.Callback(
+                "ReduxBetterAA.request_issue_report", (context, arguments) =>
+                {
+                    Type type = RequireType(RequireBetterAaAssembly(),
+                        "ReduxBetterAA.Diagnostics.Phase1ProbeService");
+                    return DynValue.NewBoolean((bool)RequireMethod(type,
+                        "RequestIssueReport", InstanceAny).Invoke(RequireStaticField(type, "Current"), null));
+                }));
             table.Set(
                 "available",
                 TestApiRegistry.Callback(
@@ -2525,6 +2545,27 @@ namespace ReduxTestHarness
             RequireMethod(coordinatorType, "SetRequestedBackend", InstanceAny)
                 .Invoke(coordinator, new[] { selection });
             return DynValue.Nil;
+        }
+
+        private static DynValue ReleaseStatus(Script script)
+        {
+            Assembly assembly = RequireBetterAaAssembly();
+            Type modType = RequireType(assembly, "ReduxBetterAA.ReduxBetterAAMod");
+            object mod = UnityEngine.Object.FindObjectOfType(modType);
+            if (mod == null) throw new InvalidOperationException("Better AA is not initialized.");
+            Type coordinatorType = RequireType(assembly, "ReduxBetterAA.Rendering.TemporalCoordinator");
+            object coordinator = RequireStaticField(coordinatorType, "Current");
+            Type probeType = RequireType(assembly, "ReduxBetterAA.Diagnostics.Phase1ProbeService");
+            object probe = RequireStaticField(probeType, "Current");
+            object visualizer = RequireVisualizer(assembly);
+            var result = new Table(script);
+            result.Set("dlaa", DynValue.NewBoolean((bool)modType.GetField("_dlaaSelectable", InstanceAny).GetValue(mod)));
+            result.Set("fsr2", DynValue.NewBoolean((bool)modType.GetField("_fsr2Selectable", InstanceAny).GetValue(mod)));
+            result.Set("mapEnabled", DynValue.FromObject(script, RequireProperty(coordinatorType, "MapViewAaEnabled").GetValue(coordinator, null)));
+            result.Set("captureBusy", DynValue.FromObject(script, RequireProperty(visualizer.GetType(), "CaptureBusy").GetValue(visualizer, null)));
+            result.Set("issueBusy", DynValue.FromObject(script, RequireProperty(probeType, "IssueReportBusy").GetValue(probe, null)));
+            result.Set("issueZip", DynValue.FromObject(script, RequireProperty(probeType, "LastIssueReport").GetValue(probe, null)));
+            return DynValue.NewTable(result);
         }
 
         private static DynValue SetVendorJitterSpread(

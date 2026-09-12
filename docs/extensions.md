@@ -21,6 +21,12 @@ Every report automatically includes the same active-mod inventory under
 `environment.mods`, which makes a failure reproducible without depending on
 the live player later.
 
+The built-in Better AA adapter also provides `release_status()` (vendor mode
+availability, map setting and capture state), `set_map_enabled(bool)` and
+`request_issue_report()`. It reflects the installed mod only when called, so
+Better AA needs no harness dependency. Backend and map changes are temporary;
+tests should restore them during cleanup. The release suite lives in Better AA.
+
 ## Register a semantic API from C#
 
 A mod that references `ReduxTestHarness.dll` and `MoonSharp.Interpreter.dll`
