@@ -92,13 +92,20 @@ Test.name
 Test.game.state / is_ready / load_save / wait_for_state / pause / unpause
 Test.flight.start / active_vessel / find_vessel / set_throttle / stage / set_sas
 Test.wait.frames / seconds / until_ (`Test.wait["until"]` is also supported)
-Test.camera.mode / target_vessel / set / orbit
+Test.camera.mode / target_vessel / set / orbit / release
 Test.render.set / get / wait_stable
 Test.mod.is_loaded / info / list / extension
 Test.capture.screenshot
 Test.assert.true_ / false_ / equal / not_equal / near / greater / less
 Test.report.note / log / metric / value / attach / fail_on_log / fail_on_log_errors
 ```
+
+Camera requests persist until changed or test teardown. `Test.camera.release()`
+applies the pending pose once and returns subsequent updates to the game's rig,
+while preserving the original pose for teardown restoration. Use it after
+`Test.camera.orbit` when measuring native camera smoothing or interpolation;
+holding an orbit request reapplies `SetGimbalState(..., false)` every frame and
+resets the rig's input smoothing.
 
 See [tests/smoke/orbit-render.lua](tests/smoke/orbit-render.lua) for a complete
 vertical-slice test, [tests/smoke/launchpad-reload.lua](tests/smoke/launchpad-reload.lua)

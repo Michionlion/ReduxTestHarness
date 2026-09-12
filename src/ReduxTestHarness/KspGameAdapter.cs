@@ -453,6 +453,15 @@ namespace ReduxTestHarness
             _cameraTarget = null;
         }
 
+        // Apply a requested pose once, then let the game's ordinary rig update.
+        // Keep the original-state snapshot so EndTest can still restore it.
+        public void ReleaseCameraControl()
+        {
+            ApplyCameraOverride();
+            _cameraRequest = null;
+            _cameraTarget = null;
+        }
+
         public void ApplyCameraOverride()
         {
             if (_cameraRequest == null || _cameraTarget == null)

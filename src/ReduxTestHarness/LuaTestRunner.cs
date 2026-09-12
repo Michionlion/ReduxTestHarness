@@ -408,6 +408,11 @@ namespace ReduxTestHarness
                 _game.TargetActiveVessel();
                 return DynValue.Nil;
             });
+            SetCallback(api, "release", (context, args) =>
+            {
+                _game.ReleaseCameraControl();
+                return DynValue.Nil;
+            });
             SetCallback(api, "orbit", (context, args) =>
             {
                 Table options = RequiredTable(args, 0, "Test.camera.orbit");
