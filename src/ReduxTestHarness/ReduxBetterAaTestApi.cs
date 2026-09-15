@@ -2560,6 +2560,14 @@ namespace ReduxTestHarness
             object visualizer = RequireVisualizer(assembly);
             var result = new Table(script);
             result.Set("dlaa", DynValue.NewBoolean((bool)modType.GetField("_dlaaSelectable", InstanceAny).GetValue(mod)));
+            result.Set("selectedBackend", DynValue.FromObject(script, RequireProperty(coordinatorType, "SelectedBackend").GetValue(coordinator, null)));
+            result.Set("active", DynValue.FromObject(script, RequireProperty(coordinatorType, "Active").GetValue(coordinator, null)));
+            object dlaaConfig = RequireProperty(coordinatorType, "DlaaConfig").GetValue(coordinator, null);
+            result.Set("dlaaPreset", DynValue.NewString(dlaaConfig.GetType().GetField("Preset").GetValue(dlaaConfig).ToString()));
+            object fsrBackend = coordinatorType.GetField("_fsr2Backend", InstanceAny).GetValue(coordinator);
+            object fsrApi = fsrBackend.GetType().GetField("_nativeApi", InstanceAny).GetValue(fsrBackend);
+            PropertyInfo frameTime = fsrApi.GetType().GetProperty("LastFrameTimeMilliseconds", InstanceAny);
+            if (frameTime != null) result.Set("fsrFrameTimeMs", DynValue.FromObject(script, frameTime.GetValue(fsrApi, null)));
             result.Set("fsr2", DynValue.NewBoolean((bool)modType.GetField("_fsr2Selectable", InstanceAny).GetValue(mod)));
             result.Set("mapEnabled", DynValue.FromObject(script, RequireProperty(coordinatorType, "MapViewAaEnabled").GetValue(coordinator, null)));
             result.Set("captureBusy", DynValue.FromObject(script, RequireProperty(visualizer.GetType(), "CaptureBusy").GetValue(visualizer, null)));

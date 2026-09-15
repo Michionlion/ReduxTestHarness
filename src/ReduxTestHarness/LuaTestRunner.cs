@@ -35,6 +35,7 @@ namespace ReduxTestHarness
         private bool _finished;
         private Exception _terminalError;
         private CaptureState _activeCapture;
+        private PanCapture _panCapture;
 
         public LuaTestRunner(
             MonoBehaviour owner,
@@ -585,6 +586,37 @@ namespace ReduxTestHarness
         private Table CreateCaptureApi()
         {
             var api = new Table(_script);
+            SetCallback(api, "pan", (context, args) =>
+            {
+                string name = RequiredNonEmptyString(args, 0, "Test.capture.pan");
+                if (!System.Text.RegularExpressions.Regex.IsMatch(name, "^[a-zA-Z0-9_-]+$"))
+                    throw new ArgumentException("Pan name must use letters, numbers, underscores or hyphens.");
+                Table options = RequiredTable(args, 1, "Test.capture.pan");
+                int fps = OptionalFieldInteger(options, "fps", 60, 1, 120, "Test.capture.pan");
+                int frames = OptionalFieldInteger(options, "frames", 480, 2, 3600, "Test.capture.pan");
+                int warmup = OptionalFieldInteger(options, "warmup", 120, 1, 600, "Test.capture.pan");
+                int width = OptionalFieldInteger(options, "width", 2560, 640, 7680, "Test.capture.pan");
+                int height = OptionalFieldInteger(options, "height", 1440, 480, 4320, "Test.capture.pan");
+                double startYaw = RequiredFieldNumber(options, "startYaw", "Test.capture.pan");
+                double endYaw = RequiredFieldNumber(options, "endYaw", "Test.capture.pan");
+                double pitch = RequiredFieldNumber(options, "pitch", "Test.capture.pan");
+                double distance = RequiredFieldNumber(options, "distance", "Test.capture.pan");
+                double fov = OptionalFieldNumber(options, "fov", 60);
+                // Validate the pose before allocating a capture or changing timing.
+                _game.SetOrbitCamera(distance, startYaw, pitch, fov);
+                _panCapture = new PanCapture(_owner, _game,
+                    Path.Combine(_artifacts.ArtifactDirectory, name));
+                _panCapture.Start(fps, frames, warmup, width, height, startYaw, endYaw, pitch, distance, fov);
+                return YieldUntil(() => _panCapture.Complete, (frames + warmup) * 5f + 60f,
+                    "camera pan", () =>
+                    {
+                        PanCapture capture = _panCapture;
+                        _panCapture = null;
+                        capture.Dispose();
+                        if (capture.Error != null) throw capture.Error;
+                        return DynValue.NewString(capture.DirectoryPath);
+                    });
+            });
             SetCallback(api, "screenshot", (context, args) =>
             {
                 string name = RequiredNonEmptyString(args, 0, "Test.capture.screenshot");
@@ -923,6 +955,7 @@ namespace ReduxTestHarness
             }
             _finished = true;
             ClearPending();
+            if (_panCapture != null) { _panCapture.Dispose(); _panCapture = null; }
             if (_activeCapture != null)
             {
                 _activeCapture.Cancelled = true;

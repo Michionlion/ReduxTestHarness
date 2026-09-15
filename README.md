@@ -96,6 +96,7 @@ Test.camera.mode / target_vessel / set / orbit / release
 Test.render.set / get / wait_stable
 Test.mod.is_loaded / info / list / extension
 Test.capture.screenshot
+Test.capture.pan
 Test.assert.true_ / false_ / equal / not_equal / near / greater / less
 Test.report.note / log / metric / value / attach / fail_on_log / fail_on_log_errors
 ```
@@ -106,6 +107,12 @@ while preserving the original pose for teardown restoration. Use it after
 `Test.camera.orbit` when measuring native camera smoothing or interpolation;
 holding an orbit request reapplies `SetGimbalState(..., false)` every frame and
 resets the rig's input smoothing.
+
+For matching Better AA comparison videos, use
+[record-betteraa-videos.ps1](scripts/record-betteraa-videos.ps1) with a disposable
+game installation and a stock-part launchpad save. See
+[capture instructions](docs/video-capture.md). It records normal flight UI and
+verifies four 8-second, 60 fps clips from the same camera path.
 
 See [tests/smoke/orbit-render.lua](tests/smoke/orbit-render.lua) for a complete
 vertical-slice test, [tests/smoke/launchpad-reload.lua](tests/smoke/launchpad-reload.lua)

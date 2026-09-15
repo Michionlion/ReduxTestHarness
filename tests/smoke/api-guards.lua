@@ -10,6 +10,16 @@ local hugeCaptureAccepted = pcall(function()
 end)
 Test.assert.false_(hugeCaptureAccepted, "unsafe screenshot scales must be rejected")
 
+local unsafePanAccepted = pcall(function()
+    Test.capture.pan("../outside", {})
+end)
+Test.assert.false_(unsafePanAccepted, "pan output cannot escape the artifact directory")
+
+local singleFramePanAccepted = pcall(function()
+    Test.capture.pan("invalid-pan", { frames = 1 })
+end)
+Test.assert.false_(singleFramePanAccepted, "a pan requires at least two frames")
+
 local cyclic = {}
 cyclic.self = cyclic
 local cyclicReportAccepted = pcall(function()
